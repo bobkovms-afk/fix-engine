@@ -65,7 +65,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     // Транзакция: члены коммитим только при успехе. Иначе после FAILED
     // врали бы чип, кнопки и тайтл (бэкенд новый, ядро старое).
     if (!glfwInit()) return false;
-    if (be == 2) { // GL: контекст 4.5
+    if (be == RC_BACKEND_GL) { // GL: контекст 4.5
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -85,7 +85,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     }
     struct RenderCore *newVrc = nullptr;
     // Vec-ядро для гизмо-оверлея делит окно/контекст (воксель под GL).
-    if (dom == RC_CAP_VOXEL && be == 2) {
+    if (dom == RC_CAP_VOXEL && be == RC_BACKEND_GL) {
         newVrc = rc_create_by(RC_CAP_VECTOR, 2u);
         if (newVrc && !newVrc->init(newVrc, win)) {
             rc_destroy(newVrc);
@@ -116,7 +116,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     }
     RcTarget *newTarget = (RcTarget *)calloc(1, sizeof(RcTarget));
     // Цель и показ — только под GL (frame_to есть только там).
-    if (be == 2) {
+    if (be == RC_BACKEND_GL) {
         if (!newTarget || !comp_target_gl_new(newTarget, 1280, 720)) {
             free(newTarget);
             free(newWorld);
@@ -228,7 +228,7 @@ void Viewport::renderOnce() {
         placeheld = 1; // ядро снесли (FAILED-пересадка): честная заглушка
         return;
     }
-    int isGL = (backend == 2);
+    int isGL = (backend == RC_BACKEND_GL);
     // Догрузка мира по 12 чанков за тик — только вокселю.
     // DDA (webgpu) ест сырьё, растр (gl/vk) — через фидер движка.
     if (domain == RC_CAP_VOXEL) {
@@ -238,7 +238,7 @@ void Viewport::renderOnce() {
         int cx = fedCur % GW, cz = fedCur / GW;
         VoxChunk *c = &((VoxChunk *)world)[cz * GW + cx];
         int ok = 0;
-        if (backend == 1 && rc->upload_chunk) {
+        if (backend == RC_BACKEND_WEBGPU && rc->upload_chunk) {
             ok = rc->upload_chunk(rc, c->cx, c->cz, c->id, 0);
         } else {
             const VoxChunk *nb[6] = {
@@ -648,7 +648,7 @@ void Viewport::paintEvent(QPaintEvent *) {
     p.drawText(8, 16, QString("fps %1").arg(fpsEma, 0, 'f', 0));
     // Чип как в референсах: FPS + бэкенд справа сверху.
     {
-        const char *be = backend == 1 ? "WebGPU" : (backend == 3 ? "Vulkan" : "OpenGL");
+        QString be = (backend == RC_BACKEND_WEBGPU) ? "WebGPU" : ((backend == RC_BACKEND_VK) ? "Vulkan" : "OpenGL");
         QString chip = QString("FPS: %1 / RHI: %2").arg(fpsEma, 0, 'f', 0).arg(be);
         QFontMetrics fm(p.font());
         int tw = fm.horizontalAdvance(chip) + 16;

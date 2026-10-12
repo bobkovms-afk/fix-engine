@@ -8,6 +8,7 @@
 #include <QWidget>
 #include <QImage>
 #include <QTimer>
+#include "../engine/render_api.h" // RC_BACKEND_* — единые константы с движком
 
 class Viewport : public QWidget {
 public:
@@ -52,7 +53,7 @@ private:
     QImage img;
     uint8_t *cpuBuf = nullptr; // RGBA 1280x720 для frame_cpu (VK/WebGPU), разово
     int placeheld = 0; // 1 если кадра нет: рисуем текст
-    int backend = 2; // выбранный в хабе (1 webgpu, 3 vk, 2 gl)
+    int backend = RC_BACKEND_GL; // выбранный в хабе (webgpu/gl/vk — RC_BACKEND_*)
     unsigned domain = 1; // домен из шаблона (1 воксель, 2 sdf, 4 вектор, 16 меш)
     int gizmoMode = 0; // 0 двигать, 1 крутить, 2 тянуть (тулбар)
     int sdfFed = 0, vecFed = 0, meshFed = 0; // разовые заливки

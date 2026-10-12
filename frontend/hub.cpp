@@ -21,11 +21,11 @@
 #include <QShortcut>
 #include <cstring>
 
-// Индекс комбо -> значение бэкенда (0 WebGPU, 1 Vulkan, 2 OpenGL в списке).
+// Индекс комбо -> значение бэкенда из контракта движка (RC_BACKEND_*).
 static int hubBackendValue(int idx) {
-    if (idx == 1) return 3; // Vulkan
-    if (idx == 2) return 2; // OpenGL
-    return 1;               // WebGPU
+    if (idx == 1) return RC_BACKEND_VK;     // Vulkan
+    if (idx == 2) return RC_BACKEND_GL;     // OpenGL
+    return RC_BACKEND_WEBGPU;               // WebGPU
 }
 
 // "2 days ago" из mtime.
