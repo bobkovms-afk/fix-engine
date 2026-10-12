@@ -86,7 +86,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     struct RenderCore *newVrc = nullptr;
     // Vec-ядро для гизмо-оверлея делит окно/контекст (воксель под GL).
     if (dom == RC_CAP_VOXEL && be == RC_BACKEND_GL) {
-        newVrc = rc_create_by(RC_CAP_VECTOR, 2u);
+        newVrc = rc_create_by(RC_CAP_VECTOR, (unsigned)RC_BACKEND_GL); // T3: без магической 2u
         if (newVrc && !newVrc->init(newVrc, win)) {
             rc_destroy(newVrc);
             newVrc = nullptr;

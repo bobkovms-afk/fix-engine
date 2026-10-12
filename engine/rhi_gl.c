@@ -56,26 +56,34 @@ static const char *rhi_gl_sodir(void) {
     return dir;
 }
 
-// Один путь -> пробует: как дан; от CWD вверх (до 6 уровней — запуск из
-// template/*, tools/*, engine/build/*); от каталога .so. Первый существующий.
-static char *rhi_gl_read(const char *path) {
+// Публичный резолв пути (T14/N5): как дан; от CWD вверх (до 6 уровней —
+// запуск из template/*, tools/*, engine/build/*); от каталога .so.
+// Возвращает статический буфер с найденным путём или NULL.
+const char *rhi_gl_find(const char *path) {
+    static char cand[2048];
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        char cand[2048];
-        const char *roots[] = { "../", "../../", "../../../", "../../../../",
-                                "../../../../../", "../../../../../../" };
-        for (unsigned i = 0; !f && i < sizeof roots / sizeof roots[0]; i++) {
-            snprintf(cand, sizeof cand, "%s%s", roots[i], path);
-            f = fopen(cand, "rb");
-            if (f) { fclose(f); f = fopen(cand, "rb"); break; }
-        }
-        const char *sd = rhi_gl_sodir();
-        if (!f && sd[0]) {
-            snprintf(cand, sizeof cand, "%s%s", sd, path);
-            f = fopen(cand, "rb");
-            if (f) { fclose(f); f = fopen(cand, "rb"); }
-        }
+    if (f) { fclose(f); snprintf(cand, sizeof cand, "%s", path); return cand; }
+    const char *roots[] = { "../", "../../", "../../../", "../../../../",
+                            "../../../../../", "../../../../../../" };
+    for (unsigned i = 0; i < sizeof roots / sizeof roots[0]; i++) {
+        snprintf(cand, sizeof cand, "%s%s", roots[i], path);
+        f = fopen(cand, "rb");
+        if (f) { fclose(f); return cand; }
     }
+    const char *sd = rhi_gl_sodir();
+    if (sd[0]) {
+        snprintf(cand, sizeof cand, "%s%s", sd, path);
+        f = fopen(cand, "rb");
+        if (f) { fclose(f); return cand; }
+    }
+    return 0;
+}
+
+// Один путь -> читаем через rhi_gl_find. Первый существующий.
+static char *rhi_gl_read(const char *path) {
+    const char *found = rhi_gl_find(path);
+    if (!found) return 0;
+    FILE *f = fopen(found, "rb");
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);

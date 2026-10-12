@@ -461,14 +461,24 @@ static int core_init2(RenderCore *rc) {
     // Пул команд/синхронизация — из RHI (rhi_vk_init уже всё поднял).
     // Атлас 16x16x9 + тинты (те же что в GL-ядре) и белый спек.
         static uint8_t tiles[VOX_TEXELS * 4];
-        // Тайлы ищутся от корня репо; запасной — рядом с движком.
+        // T14: тайлы ищем резолвом (CWD-вверх/каталог .so), не жёстким путём.
         const char *tdir = "engine/assets/tiles";
         {
-            FILE *probe = fopen("engine/assets/tiles/grass_top.png", "rb");
-            if (!probe) tdir = "assets/tiles";
-            else fclose(probe);
+            extern const char *rhi_gl_find(const char *relPath);
+            const char *hit = rhi_gl_find("engine/assets/tiles/grass_top.png");
+            if (hit) {
+                static char dirbuf[2048];
+                snprintf(dirbuf, sizeof dirbuf, "%s", hit);
+                char *sl = strrchr(dirbuf, '/');
+                if (sl) *sl = 0;
+                tdir = dirbuf;
+            } else {
+                FILE *probe = fopen("assets/tiles/grass_top.png", "rb");
+                if (!probe) tdir = 0; // fallback gray ниже
+                else fclose(probe);
+            }
         }
-        if (!vox_tex_load(tdir, tiles)) {
+        if (!tdir || !vox_tex_load(tdir, tiles)) {
         memset(tiles, 0x80, sizeof tiles);
         printf("tiles: fallback gray\n");
     }
