@@ -130,9 +130,24 @@ target_compile_options(asset_test PRIVATE -Wall -Wextra)
 # Пруф встраивания: dlopen libengine.so как редактор (линк только dl).
 add_executable(dlopen_test dlopen_test.c)
 target_include_directories(dlopen_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(dlopen_test PRIVATE dl)
+# N8: тест сам находит libengine.so рядом с собой (dladdr), но сборка
+# должна гарантировать порядок: сначала библиотека, потом тест.
+add_dependencies(dlopen_test engine_shared)
 target_compile_options(dlopen_test PRIVATE -Wall -Wextra)
 # Тест сцены: иерархия, трансформы, пул. Без GPU.
 add_executable(scene_test scene_test.c scene.c)
 target_include_directories(scene_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(scene_test PRIVATE engine_shared m)
 target_compile_options(scene_test PRIVATE -Wall -Wextra)
+
+# N12 (круг 5): CTest был не настроен вовсе — тесты только руками.
+# Регистрируем CPU-тесты; WORKING_DIRECTORY = корень репо, иначе
+# asset_test/dlopen_test не находят фикстуры (N11 закрыт здесь же).
+enable_testing()
+set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+foreach(T mat4_test comp_test phys_test scene_test asset_test engine_test dlopen_test)
+  add_test(NAME ${T} COMMAND ${T})
+  set_tests_properties(${T} PROPERTIES WORKING_DIRECTORY ${REPO_ROOT})
+endforeach()
+# rhi_test требует окно/GPU — вне автоматической очереди (запуск руками).

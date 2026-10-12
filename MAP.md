@@ -53,7 +53,7 @@
 ### P1 — сборка/ресурсы
 - [ ] T7 Шейдеры blit грузятся с относительного пути "engine/shaders/..." → падает при запуске editor из другой папки. Решаем: embed blit-шейдеров в libengine (как sdf_wgsl) или резолв пути рядом с .so.
 - [ ] T8 VK SPIR-V: load-time зависимость от VK_SPV_DIR (пути сборки). Минимально: понятная ошибка если spv нет; лучше — embed .spv в .so.
-- [ ] T9 Функциональный дубль FNV-хеша в mkdemo.sh (Python) vs engine/asset.c → сверяемся, добавляем комментарий-ссылку + тест-проверку индекса демо движком (asset_test).
+- [x] T9 ЗАКРЫТ (круг 5, проверено фактическим прогоном): кейс сверки хеша внутри engine/asset_test.c («hash parity OK»): движковый fnv() == оффлайн-FNV mkdemo.sh по байтам grass_top.png. Прогон из корня репо: ASSET OK.
 
 ### P2 — гигиена
 - [ ] T10 main.cpp: extern-объявления внутри блока функции → через panels.h.
@@ -105,12 +105,30 @@
 - Полная сборка libengine.so/editor по-прежнему невозможна в этом окружении (нет GLFW/Vulkan/glslc/сети) — отметка N6 актуальна.
 - T9 частично: хеши СИНХРОНИЗИРОВАНЫ по константам (mkdemo.sh:34-37 fnv = asset.c:9-13: offset FNV-1a 64-bit, prime 1099511628211), в mkdemo.sh есть комментарий-ссылка на engine/asset.c (стр. 29). НО: отдельного теста сверки индекса демо движком нет → T9 остаётся незакрытым (нужен asset_test-кейс: захэшировать тайл demо-депо и сверить имя файла).
 - Новые находки этого круга:
-  - N8 dlopen_test.c:16-17 — список путей libengine.so хардкод (./libengine.so, build/, engine/build/, /tmp/opencode/); рабочий вариант зависит от CWD запуска ctest → хрупко. Дёшево: добавить RWEnv/path из CMake binary dir или оставить (низкий приоритет).
+  - [x] N8 ЗАКРЫТ (круг 5): dlopen_test.c переписан — ENV LIBENGINE_PATH override, затем dladdr-якорь от каталога самого теста (не зависит от CWD), затем относительные fallback; путь /tmp/opencode убран. CMake: target_link_libraries(dl) + add_dependencies(dlopen_test engine_shared). Синтаксис проверен gcc -fsyntax-only (потребовался _GNU_SOURCE для Dl_info).
   - N9 mat4_test.c требует -lm (undefined tanf при линковке без math) — в CMake это есть (m), но ручная компиляция по инструкции в MAP ломается; зафиксировать команду с -lm.
   - N10 SkyLUT/WebGPU: webgpu_core.c и sky_lut.c требуют Dawn/FetchContent — вне локальной проверки; риски описаны ранее, задач не добавляем (зависимость от среды).
 
 ### Очередь (по порядку)
-1. T9 — тест-кейс сверки FNV-индекса (mkdemo.sh vs asset.c) внутри asset_test.c.
+1. [x] T9 — закрыт кругом 5 (asset_test.c hash-parity кейс, прогон зелёный).
 2. T12-финал — прогон ВСЕХ тестов (engine/rhi/engine/dlopen_test) на машине пользователя через cmake/tools/editor.sh.
-3. N8 — стабилизация путей dlopen_test (опционально, P2).
+3. [x] N8 — закрыт кругом 5 (dladdr-якорь + ENV override + порядок сборки в CMake).
 После закрытия T9 и подтверждения сборки пользователем — план исправлений считается выполненным; остаётся только P2-гигиена без известных открытых дефектов.
+
+
+---
+
+## КРУГ 5 (прогон + добивание хвостов) — что и где
+Фактические прогоны этого круга (gcc без CMake, из /workspace):
+- comp_test OK / scene_test OK / mat4_test OK (-lm) / phys_test OK / asset_test OK (из корня репо; из /tmp падает — фикстуры относительно CWD, см. N11 ниже).
+- gcc -fsyntax-only -Wall -Wextra на dlopen_test.c — SYNTAX_OK.
+
+Закрыто в этом круге:
+- T9: хеш-паритет кейс в engine/asset_test.c (строки ~50-63): эталонный FNV-1a 64 по байтам файла == AssetId из asset_import. Вывод «hash parity OK (597a...)».
+- N8: engine/dlopen_test.c try_open() — приоритеты: LIBENGINE_PATH env > <каталог-экзешника>/libengine.so (dladdr) > ./ , build/, engine/build/. Убран мусорный /tmp/opencode. _GNU_SOURCE добавлен.
+- engine/CMakeLists.txt: dlopen_test теперь линкует dl и собирается ПОСЛЕ engine_shared (add_dependencies) — раньше мог стартануть до библиотеки.
+
+Новые находки круга 5:
+- N11 asset_test.c привязан к CWD репо (фикстуры "engine/assets/tiles/..."). В CMake это решается WORKING_DIRECTORY у add_test, но add_test вообще нигде нет (см. N12). Для ручной команды в MAP зафиксировать: запускать из корня репо.
+- N12 В РЕПО НЕТ enable_testing()/add_test() ни в одном CMakeLists — «CTest» фактически не настроен, тесты только руками. Дёшево: enable_testing() в engine/CMakeLists.txt + add_test по каждому *_test с WORKING_DIRECTORY=${CMAKE_SOURCE_DIR}.
+Статус: все T1-T18 закрыты; открыты только N11/N12 (P2, гигиена CI) и T12-финал (полная GPU-сборка — только на машине пользователя).
