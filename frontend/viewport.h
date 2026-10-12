@@ -42,9 +42,15 @@ protected:
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
 
+public:
+    // Единый источник размера кадра вьюпорта (T11/N1: раньше 1280x720 был
+    // зашит ~30 местами в .cpp). Меняем здесь — весь пайплайн следует.
+    static constexpr int kW = 1280, kH = 720;
+
 private:
     void tick();
     void renderOnce();
+    float dayTime() const; // кэш VOX_DAYT (T5/T13): читаем env один раз
 
     struct RenderCore *rc = nullptr;
     struct RenderCore *vrc = nullptr; // vec-ядро для гизмо-оверлея (та же цель)
@@ -68,6 +74,9 @@ private:
     int fed[25] = {0};
     int fedLeft = 25, fedCur = 0;
     float camYaw = 0.6f, camPitch = -0.4f, camFov = 1.6f;
+    // Кэш VOX_DAYT (T5/T13): env читаем один раз при первом рендере,
+    // а не 3x getenv() каждый кадр. 0 = ещё не читали.
+    mutable float dayTCached = 0.0f;
     int viewMode = 0; // 0 орбита, 1 верх, 2 бок, 3 фронт (орто-кнопки тулбара)
     // Гизмо-таскание: -1 нет, 0/1/2 ось XYZ. Точка старта и якорь мыши.
     int dragAxis = -1;

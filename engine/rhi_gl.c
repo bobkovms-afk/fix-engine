@@ -1,7 +1,11 @@
 // RHI-GL: мясной бэкенд. C11. Ошибки — словами и со строками шейдеров.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1 /* glibc прячет Dl_info/dladdr за ним (T14) */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h> /* dladdr: резолв путей шейдеров от каталога .so (T14/N5) */
 #include "rhi_gl.h"
 
 void rhi_gl_hints(void) {
@@ -23,8 +27,55 @@ int rhi_gl_load(GLFWwindow *win) {
     return 1;
 }
 
+// Каталог libengine.so (один раз, dladdr по собственному символу).
+// Нужен чтобы относительные пути шейдеров работали из ЛЮБОГО CWD:
+// раньше "engine/shaders/..." резолвился от текущей папки и ломал
+// запуск редактора/демо не из корня репозитория (T14/N5).
+static const char *rhi_gl_sodir(void) {
+    static char dir[1024] = {0};
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        Dl_info info;
+        if (dladdr((const void *)rhi_gl_prog, &info) && info.dli_fname) {
+            char tmp[1024];
+            snprintf(tmp, sizeof tmp, "%s", info.dli_fname);
+            char *slash = strrchr(tmp, '/');
+            if (slash) {
+                *slash = 0;                 // .../engine/build -> .../engine
+                char *eng = strrchr(tmp, '/');
+                if (eng && strcmp(eng + 1, "build") == 0) {
+                    *eng = 0;               // откат на каталог движка
+                    snprintf(dir, sizeof dir, "%s/", tmp);
+                } else {
+                    snprintf(dir, sizeof dir, "%s/", tmp);
+                }
+            }
+        }
+    }
+    return dir;
+}
+
+// Один путь -> пробует: как дан; от CWD вверх (до 6 уровней — запуск из
+// template/*, tools/*, engine/build/*); от каталога .so. Первый существующий.
 static char *rhi_gl_read(const char *path) {
     FILE *f = fopen(path, "rb");
+    if (!f) {
+        char cand[2048];
+        const char *roots[] = { "../", "../../", "../../../", "../../../../",
+                                "../../../../../", "../../../../../../" };
+        for (unsigned i = 0; !f && i < sizeof roots / sizeof roots[0]; i++) {
+            snprintf(cand, sizeof cand, "%s%s", roots[i], path);
+            f = fopen(cand, "rb");
+            if (f) { fclose(f); f = fopen(cand, "rb"); break; }
+        }
+        const char *sd = rhi_gl_sodir();
+        if (!f && sd[0]) {
+            snprintf(cand, sizeof cand, "%s%s", sd, path);
+            f = fopen(cand, "rb");
+            if (f) { fclose(f); f = fopen(cand, "rb"); }
+        }
+    }
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);

@@ -73,7 +73,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     }
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    GLFWwindow *win = glfwCreateWindow(1280, 720, "ed-viewport", 0, 0);
+    GLFWwindow *win = glfwCreateWindow(Viewport::kW, Viewport::kH, "ed-viewport", 0, 0);
     if (!win) return false;
     // Ядро по таблице «домен x бэкенд» (домен из шаблона, бэкенд из хаба).
     // Нет ячейки (напр. SDF под Vulkan) — честный false, редактор скажет.
@@ -117,7 +117,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     RcTarget *newTarget = (RcTarget *)calloc(1, sizeof(RcTarget));
     // Цель и показ — только под GL (frame_to есть только там).
     if (be == RC_BACKEND_GL) {
-        if (!newTarget || !comp_target_gl_new(newTarget, 1280, 720)) {
+        if (!newTarget || !comp_target_gl_new(newTarget, Viewport::kW, Viewport::kH)) {
             free(newTarget);
             free(newWorld);
             newRc->shutdown(newRc);
@@ -142,9 +142,9 @@ bool Viewport::initDomain(unsigned dom, int be) {
     backend = be;
     domain = dom;
     sdfFed = vecFed = meshFed = 0;
-    img = QImage(1280, 720, QImage::Format_RGB888);
+    img = QImage(Viewport::kW, Viewport::kH, QImage::Format_RGB888);
     img.fill(Qt::black);
-    if (!cpuBuf) cpuBuf = (uint8_t *)calloc((size_t)1280 * 720, 4); // разово
+    if (!cpuBuf) cpuBuf = (uint8_t *)calloc((size_t)Viewport::kW * Viewport::kH, 4); // разово
     if (!cpuBuf) return false;
     return true;
 }
@@ -207,8 +207,8 @@ static int project_pt(const float *pv, float x, float y, float z, float *ox, flo
     float cw = pv[3] * x + pv[7] * y + pv[11] * z + pv[15];
     if (cw <= 0.0f) return 0;
     float nx = cx / cw, ny = cy / cw;
-    *ox = (nx * 0.5f + 0.5f) * 1280.0f;
-    *oy = (1.0f - (ny * 0.5f + 0.5f)) * 720.0f;
+    *ox = (nx * 0.5f + 0.5f) * (float)Viewport::kW;
+    *oy = (1.0f - (ny * 0.5f + 0.5f)) * (float)Viewport::kH;
     return 1;
 }
 
@@ -221,6 +221,17 @@ static float seg_dist(float px, float py, float ax, float ay, float bx, float by
     if (t > 1.0f) t = 1.0f;
     float qx = ax + dx * t - px, qy = ay + dy * t - py;
     return sqrtf(qx * qx + qy * qy);
+}
+
+// VOX_DAYT (секунды суток): env читаем ОДИН раз, кэшируем (T5/T13).
+// Дефолт — полдень (242с, верх дуги sdf_sun), как в референсной сцене.
+float Viewport::dayTime() const {
+    if (dayTCached == 0.0f) {
+        const char *e = getenv("VOX_DAYT");
+        dayTCached = (e && e[0]) ? (float)atof(e) : 242.0f;
+        if (dayTCached == 0.0f) dayTCached = 0.0001f; // 0 в env != "не читали"
+    }
+    return dayTCached == 0.0001f ? 0.0f : dayTCached;
 }
 
 void Viewport::renderOnce() {
@@ -335,10 +346,10 @@ void Viewport::renderOnce() {
         static const uint8_t bars[8][3] = {{255, 255, 255}, {255, 255, 0}, {0, 255, 255},
                                            {0, 255, 0}, {255, 0, 255}, {255, 0, 0},
                                            {0, 0, 255}, {0, 0, 0}};
-        int ly = (frame * 4) % 720;
-        for (int y = 0; y < 720; y++) {
-            uint8_t *row = cpuBuf + (size_t)y * 1280 * 4;
-            for (int x = 0; x < 1280; x++) {
+        int ly = (frame * 4) % Viewport::kH;
+        for (int y = 0; y < Viewport::kH; y++) {
+            uint8_t *row = cpuBuf + (size_t)y * Viewport::kW * 4;
+            for (int x = 0; x < Viewport::kW; x++) {
                 const uint8_t *c = bars[(x / 160) % 8];
                 row[x * 4 + 0] = c[0];
                 row[x * 4 + 1] = c[1];
@@ -351,7 +362,7 @@ void Viewport::renderOnce() {
                 }
             }
         }
-        rc->upload_pixels(rc, cpuBuf, 1280, 720);
+        rc->upload_pixels(rc, cpuBuf, Viewport::kW, Viewport::kH);
     }
     RcView v;
     memset(&v, 0, sizeof v);
@@ -388,8 +399,8 @@ void Viewport::renderOnce() {
         v.pitch = (float)asin(dy / dl);
     }
     v.fov = camFov;
-    v.resW = 1280;
-    v.resH = 720;
+    v.resW = Viewport::kW;
+    v.resH = Viewport::kH;
     v.sunDir.x = 0.4f; v.sunDir.y = 0.75f; v.sunDir.z = 0.3f;
     // Грейд DDA как в референсной сцене template/scene3d (иначе WebGPU в нулях:
     // шейдер множит всё на exposure). GL/VK эти поля не едят.
@@ -399,9 +410,7 @@ void Viewport::renderOnce() {
     v.time = (float)frame / 60.0f;
     // Время суток как в демо (VOX_DAYT, секунды): дефолт полдень (242с,
     // верх дуги sdf_sun), чтобы фаза WebGPU была днём как GL/VK, не сумерками.
-    v.dayT = getenv("VOX_DAYT") && getenv("VOX_DAYT")[0]
-                 ? (float)atof(getenv("VOX_DAYT"))
-                 : 242.0f;
+    v.dayT = dayTime();
     if (isGL && target && rc->frame_to) {
         rc->frame_to(rc, &v, target);
         // Гизмо-оверлей вторым проходом (vec, бленд): оси выбранной сущности.
@@ -415,7 +424,7 @@ void Viewport::renderOnce() {
                 Vec3 f2, r2, u2;
                 cam_basis(v.yaw, v.pitch, &f2, &r2, &u2);
                 Mat4 pr = m4persp(2.0f * atanf(0.5f / (v.fov > 0.2f ? v.fov : 1.6f)),
-                                  1280.0f / 720.0f, 0.1f, 600.0f);
+                                  (float)Viewport::kW / (float)Viewport::kH, 0.1f, 600.0f);
                 Mat4 vw = m4look(v.camPos.x, v.camPos.y, v.camPos.z,
                                  v.camPos.x + f2.x, v.camPos.y + f2.y, v.camPos.z + f2.z);
                 Mat4 pv = m4mul(&pr, &vw);
@@ -458,15 +467,15 @@ void Viewport::renderOnce() {
             }
             RcView vv;
             memset(&vv, 0, sizeof vv);
-            vv.resW = 1280;
-            vv.resH = 720;
+            vv.resW = Viewport::kW;
+            vv.resH = Viewport::kH;
             vrc->frame_to(vrc, &vv, target);
         }
         // Цель -> QImage (верх GL снизу: строки флипаем).
         glBindFramebuffer(GL_FRAMEBUFFER, target->fbo);
-        static uint8_t row[1280 * 3];
-        for (int y = 0; y < 720; y++) {
-            glReadPixels(0, y, 1280, 1, GL_RGB, GL_UNSIGNED_BYTE, row);
+        static uint8_t row[Viewport::kW * 3];
+        for (int y = 0; y < Viewport::kH; y++) {
+            glReadPixels(0, y, Viewport::kW, 1, GL_RGB, GL_UNSIGNED_BYTE, row);
             uint8_t *dst = img.scanLine(719 - y);
             memcpy(dst, row, sizeof row);
         }
@@ -474,11 +483,11 @@ void Viewport::renderOnce() {
     } else if (rc->frame_cpu && cpuBuf) {
         // VK/WebGPU: ядро рендерит и скачивает кадр в CPU (RGBA, верх первый).
         // Синхронный сталл на забор — честная цена встраивания, как glReadPixels.
-        if (rc->frame_cpu(rc, &v, cpuBuf, 1280, 720)) {
-            for (int y = 0; y < 720; y++) {
-                uint8_t *s = cpuBuf + (size_t)y * 1280 * 4;
+        if (rc->frame_cpu(rc, &v, cpuBuf, Viewport::kW, Viewport::kH)) {
+            for (int y = 0; y < Viewport::kH; y++) {
+                uint8_t *s = cpuBuf + (size_t)y * Viewport::kW * 4;
                 uint8_t *d = img.scanLine(y);
-                for (int x = 0; x < 1280; x++) {
+                for (int x = 0; x < Viewport::kW; x++) {
                     d[x * 3 + 0] = s[x * 4 + 0];
                     d[x * 3 + 1] = s[x * 4 + 1];
                     d[x * 3 + 2] = s[x * 4 + 2];
@@ -532,11 +541,11 @@ bool Viewport::hasPicture() const {
 static int to_image(Viewport *vp, float mx, float my, float *ix, float *iy) {
     int w = vp->width(), h = vp->height();
     if (w <= 0 || h <= 0) return 0;
-    float sc = w / 1280.0f < h / 720.0f ? w / 1280.0f : h / 720.0f;
-    float ox = (w - 1280.0f * sc) * 0.5f, oy = (h - 720.0f * sc) * 0.5f;
+    float sc = w / (float)Viewport::kW < h / (float)Viewport::kH ? w / (float)Viewport::kW : h / (float)Viewport::kH;
+    float ox = (w - (float)Viewport::kW * sc) * 0.5f, oy = (h - (float)Viewport::kH * sc) * 0.5f;
     *ix = (mx - ox) / sc;
     *iy = (my - oy) / sc;
-    return *ix >= 0 && *ix < 1280 && *iy >= 0 && *iy < 720;
+    return *ix >= 0 && *ix < Viewport::kW && *iy >= 0 && *iy < Viewport::kH;
 }
 
 void Viewport::mousePressEvent(QMouseEvent *e) {
@@ -597,7 +606,7 @@ void Viewport::mouseMoveEvent(QMouseEvent *e) {
     float dist = sqrtf((pcamX - dragPX) * (pcamX - dragPX) +
                        (pcamY - dragPY) * (pcamY - dragPY) +
                        (pcamZ - dragPZ) * (pcamZ - dragPZ));
-    float wpp = dist / (pfov > 0.2f ? pfov : 1.6f) / 720.0f;
+    float wpp = dist / (pfov > 0.2f ? pfov : 1.6f) / (float)Viewport::kH;
     float pixAlong = (ix - dragSX) * dx + (iy - dragSY) * dy;
     float along = pixAlong * wpp;
     ScTransform et = sc_get(ui_world(), sel);

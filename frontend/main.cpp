@@ -339,10 +339,8 @@ static QMainWindow *openEditor(const QString &project, int backend) {
     if (getenv("ED_SELECT") && getenv("ED_SELECT")[0]) {
         QString nm = QString::fromUtf8(getenv("ED_SELECT"));
         QTimer::singleShot(500, [nm, con]() {
-            extern void ui_select(unsigned);
-            extern struct ScWorld *ui_world(void);
-            extern int sc_list(const struct ScWorld *, unsigned *, int);
-            extern const char *sc_name(const struct ScWorld *, unsigned);
+            // T10/N4: без extern-в-теле — ui_* из panels.h, sc_* из scene.h
+            // (оба уже включены выше).
             struct ScWorld *w = ui_world();
             unsigned list[64];
             int n = sc_list(w, list, 64);
