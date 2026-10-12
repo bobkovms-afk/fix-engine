@@ -17,6 +17,7 @@
 #include "vox/vox_gen.h"
 #include "vox_feed.h"
 #include <QMouseEvent>
+#include <cstdio>   // fprintf (T7: лог отсутствия blit-шейдеров)
 
 Viewport::Viewport(QWidget *parent) : QWidget(parent) {
     setMinimumSize(480, 270);
@@ -129,8 +130,15 @@ bool Viewport::initDomain(unsigned dom, int be) {
             glfwDestroyWindow(win);
             return false;
         }
-        presentProg = rhi_gl_prog("engine/shaders/blit/blit.vert",
-                                  "engine/shaders/blit/blit.frag");
+        // T7/N2: относительный путь работал только при запуске editor из
+        // корня репозитория. Резолвим через rhi_gl_find (CWD -> каталог .so),
+        // фолбэк — прежний путь (rhi_gl_prog сама повторит попытку).
+        const char *bv = rhi_gl_find("engine/shaders/blit/blit.vert");
+        const char *bf = rhi_gl_find("engine/shaders/blit/blit.frag");
+        presentProg = rhi_gl_prog(bv ? bv : "engine/shaders/blit/blit.vert",
+                                  bf ? bf : "engine/shaders/blit/blit.frag");
+        if (!presentProg)
+            fprintf(stderr, "[viewport] blit shaders not found via CWD/.so resolution\n");
         presentVao = rhi_gl_empty_vao();
     }
     // Успех: коммит. Старое окно/ядра уже снесены вызывателем.
@@ -262,16 +270,39 @@ void Viewport::renderOnce() {
         fedCur++;
     }
     } // domain == VOXEL
-    // Не-воксель: разовая заливка демо-сцены шаблона (та же что в scene3d).
-    if (domain == RC_CAP_SDF && !sdfFed && rc->upload_sdf) {
+    // T6: UI-мир (ScWorld, гизмо/инспектор) влияет на картинку.
+    // Сущности "cube"/"sphere" из инспектора управляют примитивами демо-сцены
+    // (раньше сцена была хардкодом и scene.txt/гизмо не двигали ничего).
+    ScWorld *uiw = ui_world();
+    Entity eCube = 0, eSph = 0;
+    if (uiw) {
+        static Entity lstBuf[SC_MAX];
+        Entity *lst = lstBuf;
+        int n = sc_list(uiw, lst, SC_MAX);
+        for (int i = 0; i < n; i++) {
+            const char *nm = sc_name(uiw, lst[i]);
+            if (!eCube && nm && !strcmp(nm, "cube")) eCube = lst[i];
+            else if (!eSph && nm && !strcmp(nm, "sphere")) eSph = lst[i];
+        }
+    }
+    ScTransform trCube = { {0,0,0}, {0,0,0}, {1,1,1} };
+    ScTransform trSph = { {0,0,0}, {0,0,0}, {1,1,1} };
+    if (eCube) trCube = sc_get(uiw, eCube);
+    if (eSph) trSph = sc_get(uiw, eSph);
+
+    // SDF: полная сцена каждый кадр (upload_sdf — контракт «кадр примитивов»).
+    if (domain == RC_CAP_SDF && rc->upload_sdf) {
         RcSdfObj prims[4];
         memset(prims, 0, sizeof prims);
-        prims[0].kind = 0; // сфера
-        prims[0].p0.x = 8; prims[0].p0.y = 56; prims[0].p0.z = 8;
-        prims[0].r = 3.0f; prims[0].mat = 0;
-        prims[1].kind = 1; // короб
-        prims[1].p0.x = 20; prims[1].p0.y = 54; prims[1].p0.z = -6;
-        prims[1].p1.x = 2.5f; prims[1].p1.y = 2.5f; prims[1].p1.z = 2.5f;
+        prims[0].kind = 0; // сфера (её ведёт сущность "sphere")
+        prims[0].p0.x = 8 + trSph.pos.x; prims[0].p0.y = 56 + trSph.pos.y; prims[0].p0.z = 8 + trSph.pos.z;
+        float ss = fmaxf(trSph.scale.x, 0.05f);
+        prims[0].r = 3.0f * ss; prims[0].mat = 0;
+        prims[1].kind = 1; // короб (ведёт "cube")
+        prims[1].p0.x = 20 + trCube.pos.x; prims[1].p0.y = 54 + trCube.pos.y; prims[1].p0.z = -6 + trCube.pos.z;
+        prims[1].p1.x = 2.5f * fmaxf(trCube.scale.x, 0.05f);
+        prims[1].p1.y = 2.5f * fmaxf(trCube.scale.y, 0.05f);
+        prims[1].p1.z = 2.5f * fmaxf(trCube.scale.z, 0.05f);
         prims[1].mat = 1;
         prims[2].kind = 2; // тор
         prims[2].p0.x = -4; prims[2].p0.y = 55; prims[2].p0.z = 14;
@@ -281,7 +312,7 @@ void Viewport::renderOnce() {
         prims[3].p0.x = -12; prims[3].p0.y = 58; prims[3].p0.z = 2;
         prims[3].p1.x = -6; prims[3].p1.y = 62; prims[3].p1.z = 2;
         prims[3].r = 0.8f; prims[3].mat = 3;
-        if (rc->upload_sdf(rc, prims, 4)) sdfFed = 1;
+        rc->upload_sdf(rc, prims, 4);
     }
     if (domain == RC_CAP_VECTOR && !vecFed && rc->upload_vector) {
         RcVecShape sh[4];
@@ -304,41 +335,53 @@ void Viewport::renderOnce() {
         memcpy(sh[3].rgba, blue, sizeof blue);
         if (rc->upload_vector(rc, sh, 4)) vecFed = 1;
     }
-    if (domain == RC_CAP_MESH && !meshFed && rc->upload_mesh) {
+    if (domain == RC_CAP_MESH && rc->upload_mesh) {
         // Куб-суп 36 вершин x 9 float (pos3 norm3 col3), как в scene3d.
+        // T6: трансформ сущности "cube" из UI-мира применяется к вершинам
+        // (центр куба в мировых координатах = (-24,56,-16) + trCube.pos).
         static float cube[36 * 9];
-        static int cubeMade = 0;
-        if (!cubeMade) {
-            float C[6][3] = {{0.8f, 0.15f, 0.1f}, {1, 0.8f, 0.1f}, {0.15f, 0.7f, 0.15f},
-                             {0.3f, 0.3f, 0.32f}, {0.15f, 0.3f, 0.8f}, {0.15f, 0.7f, 0.7f}};
-            float NN[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-            float P[6][4][3] = {{{1, -1, 1}, {1, -1, -1}, {1, 1, -1}, {1, 1, 1}},
-                                {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
-                                {{-1, 1, 1}, {1, 1, 1}, {1, 1, -1}, {-1, 1, -1}},
-                                {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
-                                {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
-                                {{1, -1, -1}, {-1, -1, -1}, {-1, 1, -1}, {-1, 1, -1}}};
-            int idx[6] = {0, 1, 2, 0, 2, 3}, n = 0;
-            for (int f = 0; f < 6; f++)
-                for (int k = 0; k < 6; k++) {
-                    int q = idx[k];
-                    cube[n * 9 + 0] = -24.0f + P[f][q][0] * 3.0f;
-                    cube[n * 9 + 1] = 56.0f + P[f][q][1] * 3.0f;
-                    cube[n * 9 + 2] = -16.0f + P[f][q][2] * 3.0f;
-                    cube[n * 9 + 3] = NN[f][0];
-                    cube[n * 9 + 4] = NN[f][1];
-                    cube[n * 9 + 5] = NN[f][2];
-                    cube[n * 9 + 6] = C[f][0];
-                    cube[n * 9 + 7] = C[f][1];
-                    cube[n * 9 + 8] = C[f][2];
-                    n++;
-                }
-            cubeMade = 1;
-        }
+        float C[6][3] = {{0.8f, 0.15f, 0.1f}, {1, 0.8f, 0.1f}, {0.15f, 0.7f, 0.15f},
+                         {0.3f, 0.3f, 0.32f}, {0.15f, 0.3f, 0.8f}, {0.15f, 0.7f, 0.7f}};
+        float NN[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        float P[6][4][3] = {{{1, -1, 1}, {1, -1, -1}, {1, 1, -1}, {1, 1, 1}},
+                            {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
+                            {{-1, 1, 1}, {1, 1, 1}, {1, 1, -1}, {-1, 1, -1}},
+                            {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+                            {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
+                            {{1, -1, -1}, {-1, -1, -1}, {-1, 1, -1}, {-1, 1, -1}}};
+        int idx[6] = {0, 1, 2, 0, 2, 3};
+        float ry = cosf(trCube.rot.x), sy = sinf(trCube.rot.x);
+        float rp = cosf(trCube.rot.y), sp = sinf(trCube.rot.y);
+        float rr = cosf(trCube.rot.z), sr = sinf(trCube.rot.z);
+        // M = Ry(yaw)*Rx(pitch)*Rz(roll) — тот же порядок, что m4euler в mat4.h.
+        float M[9] = {
+            ry * rr + sy * sp * sr, -ry * sr + sy * sp * rr, sy * rp,
+            rp * sr,                 rr * rp,                 -sp,
+            -sy * rr + ry * sp * sr, sy * sr + ry * sp * rr,  ry * rp
+        };
+        int n = 0;
+        for (int f = 0; f < 6; f++)
+            for (int k = 0; k < 6; k++) {
+                int q = idx[k];
+                float lx = P[f][q][0] * 3.0f * fmaxf(trCube.scale.x, 0.05f);
+                float ly = P[f][q][1] * 3.0f * fmaxf(trCube.scale.y, 0.05f);
+                float lz = P[f][q][2] * 3.0f * fmaxf(trCube.scale.z, 0.05f);
+                cube[n * 9 + 0] = -24.0f + trCube.pos.x + M[0] * lx + M[1] * ly + M[2] * lz;
+                cube[n * 9 + 1] = 56.0f + trCube.pos.y + M[3] * lx + M[4] * ly + M[5] * lz;
+                cube[n * 9 + 2] = -16.0f + trCube.pos.z + M[6] * lx + M[7] * ly + M[8] * lz;
+                float nx0 = NN[f][0], ny0 = NN[f][1], nz0 = NN[f][2];
+                cube[n * 9 + 3] = M[0] * nx0 + M[1] * ny0 + M[2] * nz0;
+                cube[n * 9 + 4] = M[3] * nx0 + M[4] * ny0 + M[5] * nz0;
+                cube[n * 9 + 5] = M[6] * nx0 + M[7] * ny0 + M[8] * nz0;
+                cube[n * 9 + 6] = C[f][0];
+                cube[n * 9 + 7] = C[f][1];
+                cube[n * 9 + 8] = C[f][2];
+                n++;
+            }
         RcMesh m;
         m.verts = cube;
         m.nverts = 36;
-        if (rc->upload_mesh(rc, &m)) meshFed = 1;
+        rc->upload_mesh(rc, &m);
     }
     // Пиксель: живой тест-паттерн каждый кадр (полосы + бегущая строка).
     // cpuBuf тут свободен (frame_cpu у пикселя не используется).
