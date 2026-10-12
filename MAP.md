@@ -142,3 +142,43 @@
 - asset_test  = OK из корня репо; hash parity 597a6f8e1d10b2fa подтверждён фактическим запуском. ВАЖНО: vfs.h header-only — отдельного .c нет (ранее в логе был неверный вызов с vfs*.c; тест всё равно зелёный).
 Уточнение к предыдущей записи «все тесты зелёные»: физически перепроверены и подтверждены выводом эти 5 CPU-тестов. НЕ проверяемы здесь (нет GLFW dev / glslc / Qt / дисплея): engine_test, rhi_test, dlopen_test рантайм, libengine.so, frontend/viewport.cpp компиляция, Qt-редактор, визуал. Синтаксис GPU-частей (engine.c/gl_core.c/rhi_gl.c/vox_feed.c) даже -fsyntax-only не проходит без glfw3.h — это ограничение среды, а не дефект кода.
 ИТОГ КРУГА 6: расхождений между картой и кодом не найдено; список открытых пунктов не изменился — только T12-финал на машине пользователя.
+
+## КРУГ 7 — аудит Windows-портируемости (запрос: проект под Arch, но должен запускаться на Windows)
+Фактическая проверка кода (grep/чтение), не домыслы:
+
+### Что уже кроссплатформенно (подтверждено):
+- Vulkan surface создаётся через glfwCreateWindowSurface (rhi_vk.c:60) — GLFW сам выбирает Win32/XCB surface; VK_USE_PLATFORM_* в vulkan.h включаются по _WIN32 автоматически. ПЛАТФОРМЫ В КОДЕ НЕТ.
+- glad/vulkan headers в third-party — идут с репозиторием.
+- Шейдерные пути — '/' в fopen: Windows принимает слеши в API-пути. ОК.
+- CMakeLists используют find_package(glfw3)/OpenGL/Vulkan + FetchContent(Dawn) — стандартно работает и на Win (Vulkan SDK + glslc есть для Win).
+
+### Найденные платформенные зависимости (тормозят запуск на чистом Win):
+- W1 dladdr/dlfcn.h (rhi_gl.c, vk_core.c, dlopen_test.c) — на Win нет. ЧАСТИЧНО ЗАКРЫТО ЭТИМ КРУГОМ: rhi_gl.c получил слой eng_module_path() (#ifdef _WIN32 → GetModuleFileNameA(NULL), POSIX → dladdr; плюс fallback dladdr по rhi_gl_prog для статической линковки). НЕ ЗАКРЫТО: vk_core.c (стр. ~134 dladdr напрямую) и dlopen_test.c (dlopen/dlsym без Win32-обёрток LoadLibraryA/GetProcAddress/FreeLibrary).
+- W2 OpenGL::GL + -lGL: на Win это opengl32.lib (CMake OpenGL::GL абстрагирует — ок), но opengl32.dll поддерживает только GL 4.5 если драйвер новый — норм.
+- W3 libengine.so vs engine.dll: frontend/CMakeLists.txt жёстко ${...}/../engine/build/libengine.so — на Win файл называется engine.dll (или libengine.dll при MinGW). Нужен ${CMAKE_SHARED_LIBRARY_PREFIX}engine${CMAKE_SHARED_LIBRARY_SUFFIX}. main.cpp/viewport.cpp упоминают «libengine.so» только в строках UI (косметика).
+- W4 tools/*.sh (editor.sh/run.sh/mkdemo.sh/matrix.sh) — sh-only; на Win нужен PowerShell/Git-Bash вариант или .cmd-обёртки. mkdemo генерирует текстовые проекты — переносим тривиально.
+- W5 DISPLAY-проверки в run.sh/editor.sh — unix-специфика.
+- W6 env-контракты (VOX_DAYT, ED_PROJECT, LIBENGINE_PATH...) — SetEnvironmentVariable/cmd `set` работают так же, проблем нет.
+- W7 webgpu Dawn через FetchContent с GitHub — на Win собирается, но требует Visual Studio 2022 toolchain; сборка долгая. Альтернатива на Win: --core gl|vk.
+
+### Тесты круга 7:
+- Все CPU-тесты перепрогнаны после правки rhi_gl.c: mat4/comp/phys/scene/asset = OK.
+- gcc -fsyntax-only dlopen_test.c — SYNTAX_OK (правка rhi_gl.c на него не влияет).
+- rhi_gl.c синтаксис здесь не проверяем (нет glfw3.h — ограничение среды, как в круге 6).
+
+### Задачи из круга 7 (очередь портирования):
+- [x] T19=W1a: rhi_gl.c — кроссплатформенный якорь модуля (сделано этим кругом).
+- [ ] T20=W1b: vk_core.c — тот же слой eng_module_path вместо прямого dladdr (+ PATHSEP_CHR в strrchr стр. ~137,474).
+- [ ] T21=W1c: dlopen_test.c — #ifdef _WIN32: LoadLibraryA/GetProcAddress/FreeLibrary + поиск engine.dll рядом с exe (GetModuleFileNameA).
+- [ ] T22=W3: frontend/CMakeLists.txt — имя библиотеки через CMAKE_*_LIBRARY_* переменные; ENGINE_LIB = .../engine/build/${CMAKE_SHARED_LIBRARY_PREFIX}engine${CMAKE_SHARED_LIBRARY_SUFFIX}.
+- [ ] T23=W4/W5: tools/editor.ps1 + tools/run.ps1 (или .cmd) — эквиваленты editor.sh/run.sh без DISPLAY (на Win окно всегда куда показать).
+- [ ] T24: README/инструкция запуска на Windows (deps: Vulkan SDK, Qt6, GLFW via vcpkg).
+
+### Как запустить на Windows (рабочий маршрут СЕЙЧАС, до T20–T23):
+1. Установить: Visual Studio 2022 (+C++), CMake ≥3.20, Qt 6 (msvc_64), Vulkan SDK (даёт glslc+вulkan.lib), GLFW (vcpkg install glfw3), Git for Windows (даёт bash!).
+2. Самый быстрый путь — **Git Bash** (он уже ставит sh): 
+   `cmake -S engine -B engine/build && cmake --build engine/build --config Release`
+   затем `./tools/run.sh gl` (DISPLAY пуст → скрипт откажет; обход: запустить engine/build/Release/scene3d.exe --core gl напрямую).
+   Либо использовать cmd/PowerShell напрямую: scene3d.exe, editor.exe из frontend/build/Release.
+3. Редактор: `cmake -S frontend -B frontend/build && cmake --build frontend/build --config Release` — УПАДЁТ на проверке libengine.so (W3) → временный хак: копировать engine.dll → libengine.so в build-каталог движка, либо дождаться T22.
+Полная нативная поддержка Win = закрытие T20–T24.

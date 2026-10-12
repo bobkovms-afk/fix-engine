@@ -5,8 +5,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dlfcn.h> /* dladdr: резолв путей шейдеров от каталога .so (T14/N5) */
 #include "rhi_gl.h"
+
+/* W1 (Windows portability): единый слой якоря модуля и разделителя путей.
+   POSIX: dladdr по символу движка (работает и для .so, и при статической
+   линковке — тогда dli_fname = путь экзешника).
+   Win32: GetModuleFileNameA(NULL) — путь .exe; редактор кладёт engine.dll
+   рядом с собой, каталог exe = надёжный якорь.
+   Файл-система Windows принимает '/' в fopen, поэтому строковые пути
+   остаются с '/' — менять их не нужно. */
+#ifdef _WIN32
+#include <windows.h>
+#define PATHSEP_CHR '\\'
+static int eng_module_path(char *out, unsigned cap) {
+    return GetModuleFileNameA(NULL, out, cap) > 0;
+}
+#else
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1 /* glibc прячет Dl_info/dladdr за ним (T14) */
+#endif
+#include <dlfcn.h> /* dladdr: резолв путей шейдеров от каталога .so (T14/N5) */
+#define PATHSEP_CHR '/'
+static int eng_module_path(char *out, unsigned cap) {
+    extern const char *eng_version(void);
+    Dl_info info;
+    if (dladdr((const void *)eng_version, &info) && info.dli_fname) {
+        snprintf(out, cap, "%s", info.dli_fname); /* libengine.so/dll */
+        return 1;
+    }
+    if (dladdr((const void *)rhi_gl_prog, &info) && info.dli_fname) {
+        snprintf(out, cap, "%s", info.dli_fname); /* статич. линковка: exe */
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 void rhi_gl_hints(void) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -36,14 +69,12 @@ static const char *rhi_gl_sodir(void) {
     static int tried = 0;
     if (!tried) {
         tried = 1;
-        Dl_info info;
-        if (dladdr((const void *)rhi_gl_prog, &info) && info.dli_fname) {
-            char tmp[1024];
-            snprintf(tmp, sizeof tmp, "%s", info.dli_fname);
-            char *slash = strrchr(tmp, '/');
+        char tmp[1024];
+        if (eng_module_path(tmp, sizeof tmp)) {
+            char *slash = strrchr(tmp, PATHSEP_CHR);
             if (slash) {
                 *slash = 0;                 // .../engine/build -> .../engine
-                char *eng = strrchr(tmp, '/');
+                char *eng = strrchr(tmp, PATHSEP_CHR);
                 if (eng && strcmp(eng + 1, "build") == 0) {
                     *eng = 0;               // откат на каталог движка
                     snprintf(dir, sizeof dir, "%s/", tmp);
