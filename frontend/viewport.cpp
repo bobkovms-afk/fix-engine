@@ -225,13 +225,13 @@ static float seg_dist(float px, float py, float ax, float ay, float bx, float by
 
 // VOX_DAYT (секунды суток): env читаем ОДИН раз, кэшируем (T5/T13).
 // Дефолт — полдень (242с, верх дуги sdf_sun), как в референсной сцене.
+// Sentinel «не читали» = NAN: честный VOX_DAYT=0 больше не путается с «пусто».
 float Viewport::dayTime() const {
-    if (dayTCached == 0.0f) {
+    if (std::isnan(dayTCached)) {
         const char *e = getenv("VOX_DAYT");
         dayTCached = (e && e[0]) ? (float)atof(e) : 242.0f;
-        if (dayTCached == 0.0f) dayTCached = 0.0001f; // 0 в env != "не читали"
     }
-    return dayTCached == 0.0001f ? 0.0f : dayTCached;
+    return dayTCached;
 }
 
 void Viewport::renderOnce() {

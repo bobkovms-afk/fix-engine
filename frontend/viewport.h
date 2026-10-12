@@ -5,6 +5,7 @@
 // в FBO-цель через frame_to, пиксели забираем glReadPixels в QImage.
 // VK/WebGPU — через frame_cpu (ядро рендерит и скачивает в RGBA).
 // Никакого QOpenGLWidget: обмен через память, контексты не делим.
+#include <cmath>   // NAN для dayTCached (sentinel «env не читали»)
 #include <QWidget>
 #include <QImage>
 #include <QTimer>
@@ -76,7 +77,9 @@ private:
     float camYaw = 0.6f, camPitch = -0.4f, camFov = 1.6f;
     // Кэш VOX_DAYT (T5/T13): env читаем один раз при первом рендере,
     // а не 3x getenv() каждый кадр. 0 = ещё не читали.
-    mutable float dayTCached = 0.0f;
+    // NAN = «env ещё не читали»; любые значения env (в т.ч. VOX_DAYT=0) кэшируются
+    // корректно — раньше sentinel 0.0001f ломал честный VOX_DAYT=0 (круг 4, N-мелочь).
+    mutable float dayTCached = NAN;
     int viewMode = 0; // 0 орбита, 1 верх, 2 бок, 3 фронт (орто-кнопки тулбара)
     // Гизмо-таскание: -1 нет, 0/1/2 ось XYZ. Точка старта и якорь мыши.
     int dragAxis = -1;
