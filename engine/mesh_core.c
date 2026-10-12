@@ -32,26 +32,15 @@ static float mesh_fps(RenderCore *rc) {
     return ((MeshWrap *)rc->ctx)->fpsEma;
 }
 
+// T16: единый резолв rhi_gl_find (CWD -> вверх -> каталог .so).
 static const char *mesh_vs(void) {
-    static const char *paths[] = {
-        "engine/shaders/mesh/mesh.vert", "shaders/mesh/mesh.vert",
-    };
-    for (int i = 0; i < 2; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (f) { fclose(f); return paths[i]; }
-    }
-    return paths[0];
+    const char *hit = rhi_gl_find("engine/shaders/mesh/mesh.vert");
+    return hit ? hit : "engine/shaders/mesh/mesh.vert";
 }
 
 static const char *mesh_fs(void) {
-    static const char *paths[] = {
-        "engine/shaders/mesh/mesh.frag", "shaders/mesh/mesh.frag",
-    };
-    for (int i = 0; i < 2; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (f) { fclose(f); return paths[i]; }
-    }
-    return paths[0];
+    const char *hit = rhi_gl_find("engine/shaders/mesh/mesh.frag");
+    return hit ? hit : "engine/shaders/mesh/mesh.frag";
 }
 
 static int mesh_upload(RenderCore *rc, const RcMesh *m) {

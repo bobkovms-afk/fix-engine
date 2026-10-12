@@ -127,13 +127,8 @@ static VkShaderModule vk_shader(VKCore *c, const char *name) {
     snprintf(path, sizeof path, "%s/%s", base, name);
     size_t n = 0;
     char *code = read_bin(path, &n);
-    if (!code) {
-        const char *roots[] = { "../", "../../", "../../../", "../../../../" };
-        for (unsigned i = 0; !code && i < sizeof roots / sizeof roots[0]; i++) {
-            snprintf(path, sizeof path, "%s%s/%s", roots[i], base, name);
-            code = read_bin(path, &n);
-        }
-    }
+    // T17: каталог .so ПЕРЕ upward-эскапацией — якорь сборки надёжнее
+    // случайных "../" от произвольного CWD (совпадает с rhi_gl_find).
     if (!code) {
         Dl_info info;
         if (dladdr((const void *)eng_version, &info) && info.dli_fname) {
@@ -149,6 +144,13 @@ static VkShaderModule vk_shader(VKCore *c, const char *name) {
                     code = read_bin(path, &n);
                 }
             }
+        }
+    }
+    if (!code) {
+        const char *roots[] = { "../", "../../", "../../../", "../../../../" };
+        for (unsigned i = 0; !code && i < sizeof roots / sizeof roots[0]; i++) {
+            snprintf(path, sizeof path, "%s%s/%s", roots[i], base, name);
+            code = read_bin(path, &n);
         }
     }
     if (!code) {

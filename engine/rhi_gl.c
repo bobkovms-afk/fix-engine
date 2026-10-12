@@ -56,23 +56,27 @@ static const char *rhi_gl_sodir(void) {
     return dir;
 }
 
-// Публичный резолв пути (T14/N5): как дан; от CWD вверх (до 6 уровней —
-// запуск из template/*, tools/*, engine/build/*); от каталога .so.
+// Публичный резолв пути (T14/N5): как дан; от каталога .so (самый
+// надёжный якорь — не зависит от CWD); от CWD вверх (до 6 уровней —
+// запуск из template/*, tools/*, engine/build/*).
 // Возвращает статический буфер с найденным путём или NULL.
+// ПОРЯДОК ВАЖЕН (T17): сначала .so, потом upward-эскапация. Иначе при
+// запуске из /tmp ложный хит "../../engine/..." мог победить настоящий
+// каталог сборки.
 const char *rhi_gl_find(const char *path) {
     static char cand[2048];
     FILE *f = fopen(path, "rb");
     if (f) { fclose(f); snprintf(cand, sizeof cand, "%s", path); return cand; }
+    const char *sd = rhi_gl_sodir();
+    if (sd[0]) {
+        snprintf(cand, sizeof cand, "%s%s", sd, path);
+        f = fopen(cand, "rb");
+        if (f) { fclose(f); return cand; }
+    }
     const char *roots[] = { "../", "../../", "../../../", "../../../../",
                             "../../../../../", "../../../../../../" };
     for (unsigned i = 0; i < sizeof roots / sizeof roots[0]; i++) {
         snprintf(cand, sizeof cand, "%s%s", roots[i], path);
-        f = fopen(cand, "rb");
-        if (f) { fclose(f); return cand; }
-    }
-    const char *sd = rhi_gl_sodir();
-    if (sd[0]) {
-        snprintf(cand, sizeof cand, "%s%s", sd, path);
         f = fopen(cand, "rb");
         if (f) { fclose(f); return cand; }
     }

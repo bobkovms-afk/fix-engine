@@ -48,6 +48,20 @@ int main(void) {
         free(b1);
     }
     if (asset_path(DEPOT, 0x1234, p, sizeof p)) { printf("ASSET FAIL: ghost\n"); bad = 1; }
+    // T9: хеш движка == оффлайн-хеш mkdemo.sh (депозит демо генерится Python'ом).
+    // Эталон посчитан скриптом по байтам файла; расхождение = молчаливый рассинхрон.
+    {
+        size_t n = vfs_size(a);
+        uint8_t *buf = n ? (uint8_t *)malloc(n) : NULL;
+        if (buf && vfs_read(a, buf, n) == n) {
+            uint64_t h = 1469598103934665603ull; /* сверяйся с engine/asset.c и mkdemo.sh */
+            for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ull; }
+            if (h != i1) { printf("ASSET FAIL: hash mismatch %llx != %llx\n",
+                                  (unsigned long long)h, (unsigned long long)i1); bad = 1; }
+            else printf("hash parity OK (%llx)\n", (unsigned long long)h);
+        }
+        free(buf);
+    }
     printf(bad ? "ASSET FAIL\n" : "ASSET OK\n");
     return bad;
 }

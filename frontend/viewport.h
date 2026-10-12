@@ -51,6 +51,12 @@ public:
 private:
     void tick();
     void renderOnce();
+public:
+    // T18 (расширение T5): явный CLI override времени суток из main.cpp.
+    // Вызывается ДО первого кадра; после него getenv("VOX_DAYT") больше
+    // не читается вовсе (env = только стартовый override, как и задумано).
+    void setDayTime(float sec) { dayTCached = sec; }
+private:
     float dayTime() const; // кэш VOX_DAYT (T5/T13): читаем env один раз
 
     struct RenderCore *rc = nullptr;

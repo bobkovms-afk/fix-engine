@@ -16,6 +16,7 @@
 #include <QSettings>
 #include <string>
 #include <cstring>
+#include <cstdlib> // atof (T18: VOX_DAYT override), getenv/atoi уже использовались
 #include <QStyle>
 #include "panels.h"
 #include "viewport.h"
@@ -334,6 +335,12 @@ static QMainWindow *openEditor(const QString &project, int backend) {
     if (getenv("ED_PLAY") && getenv("ED_PLAY")[0]) {
         vp->setPlaying(true);
         con->log("autoplay");
+    }
+    // T18: VOX_DAYT — только стартовый override, читается здесь ОДИН раз.
+    // Viewport больше не трогает env в кадре (дефолт 242с = полдень).
+    if (getenv("VOX_DAYT") && getenv("VOX_DAYT")[0]) {
+        vp->setDayTime((float)atof(getenv("VOX_DAYT")));
+        con->log(QString("day time override: %1s").arg(getenv("VOX_DAYT")));
     }
     // Тест выбора: ED_SELECT=имя -> выбрать сущность после загрузки.
     if (getenv("ED_SELECT") && getenv("ED_SELECT")[0]) {
