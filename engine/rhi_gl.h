@@ -17,6 +17,10 @@ void rhi_gl_hints(void);
 int rhi_gl_load(GLFWwindow *win);
 // Программа из файлов VS+FS. 0 при ошибке (лог в stderr, со строками).
 unsigned rhi_gl_prog(const char *vsPath, const char *fsPath);
+// Резолв относительного пути ресурса: как дан; от CWD вверх (до 6 уровней);
+// от каталога libengine.so. Возвращает путь для fopen или NULL если нигде
+// нет. Нужен чтобы активы/шейдеры находились из ЛЮБОГО CWD (T14/N5).
+const char *rhi_gl_find(const char *relPath);
 // Пустой VAO (фулскрин по gl_VertexID). 0 при ошибке.
 unsigned rhi_gl_empty_vao(void);
 // Человеческий код последней ошибки GL. "" если чисто.

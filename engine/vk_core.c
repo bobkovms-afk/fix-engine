@@ -1,6 +1,9 @@
 // Ядро Vulkan (растр): RenderCore API, caps=VOXEL. Четвёртый живой домен.
 // Устройство/очередь/свопчейн — из RHI (rhi_vk); своё: renderpass, пайплайны,
 // меши greedy, UBO. Без валидационных слоёв (RHI их не поднимает).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1 /* glibc прячет Dl_info/dladdr за ним (T15) */
+#endif
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include "rhi_vk.h"
@@ -9,6 +12,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <dlfcn.h> /* dladdr: поиск spv/шейдеров от каталога .so, не от CWD (T15/N3) */
 #include "render_api.h"
 #include "mat4.h"
 #include "vk_conv.h" // все GL/VK-противоречия — там, см. шапку
@@ -99,7 +103,8 @@ static int vk_once(VKCore *c, VkCommandBuffer *outCb);
 static int vk_once_end(VKCore *c, VkCommandBuffer cb);
 
 static char *read_bin(const char *path, size_t *outN) {    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "vk: no file %s\n", path); return 0; }
+    // Тихо: vk_shader сам печатает одну итоговую ошибку после всех попыток.
+    if (!f) return 0;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -111,11 +116,49 @@ static char *read_bin(const char *path, size_t *outN) {    FILE *f = fopen(path,
 }
 
 static VkShaderModule vk_shader(VKCore *c, const char *name) {
-    char path[512];
-    snprintf(path, sizeof path, "%s/%s", VK_SPV_DIR, name);
+    // T15/N3: раньше путь был строго VK_SPV_DIR относительно CWD и при
+    // отсутствии файла падал молча в чёрное окно. Теперь: env-override,
+    // как дано, от CWD вверх, от каталога .so — и явная ошибка со списком
+    // перепробованных путей.
+    extern const char *eng_version(void);
+    const char *base = getenv("VK_SPV_DIR");
+    if (!base || !base[0]) base = VK_SPV_DIR;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", base, name);
     size_t n = 0;
     char *code = read_bin(path, &n);
-    if (!code) return VK_NULL_HANDLE;
+    // T17: каталог .so ПЕРЕ upward-эскапацией — якорь сборки надёжнее
+    // случайных "../" от произвольного CWD (совпадает с rhi_gl_find).
+    if (!code) {
+        Dl_info info;
+        if (dladdr((const void *)eng_version, &info) && info.dli_fname) {
+            char dir[768];
+            snprintf(dir, sizeof dir, "%s", info.dli_fname);
+            char *sl = strrchr(dir, '/');
+            if (sl) {
+                *sl = 0; // .../engine/build -> кладём spv рядом с .so
+                snprintf(path, sizeof path, "%s/%s", dir, name);
+                code = read_bin(path, &n);
+                if (!code) { // или build/spv_vk целиком
+                    snprintf(path, sizeof path, "%s/%s/%s", dir, "spv_vk", name);
+                    code = read_bin(path, &n);
+                }
+            }
+        }
+    }
+    if (!code) {
+        const char *roots[] = { "../", "../../", "../../../", "../../../../" };
+        for (unsigned i = 0; !code && i < sizeof roots / sizeof roots[0]; i++) {
+            snprintf(path, sizeof path, "%s%s/%s", roots[i], base, name);
+            code = read_bin(path, &n);
+        }
+    }
+    if (!code) {
+        // read_bin печатал "no file" на каждой попытке — одна явная итоговая.
+        fprintf(stderr, "vk: shader '%s' NOT FOUND after CWD/up/.so search."
+                        " Build spv (glslc) or set VK_SPV_DIR=<dir>.\n", name);
+        return VK_NULL_HANDLE;
+    }
     VkShaderModuleCreateInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -420,14 +463,24 @@ static int core_init2(RenderCore *rc) {
     // Пул команд/синхронизация — из RHI (rhi_vk_init уже всё поднял).
     // Атлас 16x16x9 + тинты (те же что в GL-ядре) и белый спек.
         static uint8_t tiles[VOX_TEXELS * 4];
-        // Тайлы ищутся от корня репо; запасной — рядом с движком.
+        // T14: тайлы ищем резолвом (CWD-вверх/каталог .so), не жёстким путём.
         const char *tdir = "engine/assets/tiles";
         {
-            FILE *probe = fopen("engine/assets/tiles/grass_top.png", "rb");
-            if (!probe) tdir = "assets/tiles";
-            else fclose(probe);
+            extern const char *rhi_gl_find(const char *relPath);
+            const char *hit = rhi_gl_find("engine/assets/tiles/grass_top.png");
+            if (hit) {
+                static char dirbuf[2048];
+                snprintf(dirbuf, sizeof dirbuf, "%s", hit);
+                char *sl = strrchr(dirbuf, '/');
+                if (sl) *sl = 0;
+                tdir = dirbuf;
+            } else {
+                FILE *probe = fopen("assets/tiles/grass_top.png", "rb");
+                if (!probe) tdir = 0; // fallback gray ниже
+                else fclose(probe);
+            }
         }
-        if (!vox_tex_load(tdir, tiles)) {
+        if (!tdir || !vox_tex_load(tdir, tiles)) {
         memset(tiles, 0x80, sizeof tiles);
         printf("tiles: fallback gray\n");
     }

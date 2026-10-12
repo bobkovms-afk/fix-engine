@@ -1,8 +1,10 @@
 // Пруф встраивания: грузим libengine.so через dlopen (как редактор),
 // сверяем версию, создаём ядро по имени и по (домен x бэкенд).
 // Линкуется ТОЛЬКО с dl — ни одного символа движка на этапе сборки.
+#define _GNU_SOURCE // dladdr + Dl_info (glibc требует feature-test макрос)
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "render_api.h" // только типы (caps/backend), линковки нет
 
@@ -12,16 +14,35 @@ typedef RenderCore *(*rc_create_by_fn)(unsigned, unsigned);
 typedef const char *(*eng_version_fn)(void);
 
 static void *try_open(void) {
+    // N8: раньше — хардкод четырёх относительных путей, рабочий вариант
+    // зависел от CWD запуска ctest. Теперь якорь = каталог самого теста
+    // (dladdr, не зависит от CWD): libengine.so лежит рядом с этим
+    // бинарником в build-дереве CMake. ENV LIBENGINE_PATH — явный override.
+    void *h = 0;
+    const char *env = getenv("LIBENGINE_PATH");
+    if (env && env[0]) {
+        h = dlopen(env, RTLD_NOW);
+        if (h) { printf("opened env %s\n", env); return h; }
+    }
+    Dl_info info;
+    if (dladdr((const void *)try_open, &info) && info.dli_fname) {
+        char cand[2048];
+        snprintf(cand, sizeof cand, "%s", info.dli_fname);
+        char *sl = strrchr(cand, '/');
+        if (sl) {
+            strcpy(sl, "/libengine.so");
+            h = dlopen(cand, RTLD_NOW);
+            if (h) { printf("opened beside-exe %s\n", cand); return h; }
+        }
+    }
+    // запасные относительные пути (ручной запуск из разных папок)
     static const char *paths[] = {
         "./libengine.so", "build/libengine.so",
-        "engine/build/libengine.so", "/tmp/opencode/libengine.so",
+        "engine/build/libengine.so",
     };
-    for (int i = 0; i < 4; i++) {
-        void *h = dlopen(paths[i], RTLD_NOW);
-        if (h) {
-            printf("opened %s\n", paths[i]);
-            return h;
-        }
+    for (int i = 0; i < 3; i++) {
+        h = dlopen(paths[i], RTLD_NOW);
+        if (h) { printf("opened %s\n", paths[i]); return h; }
     }
     return 0;
 }

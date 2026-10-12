@@ -16,11 +16,22 @@
 #include <QSettings>
 #include <string>
 #include <cstring>
+#include <cstdlib> // atof (T18: VOX_DAYT override), getenv/atoi уже использовались
 #include <QStyle>
 #include "panels.h"
 #include "viewport.h"
 #include "hub.h"
 #include "scene.h"
+#include "render_api.h" // RC_BACKEND_* / RC_CAP_* — единые константы с движком
+
+// Имя бэкенда по константе контракта (не магические 1/2/3).
+static QString backendName(int be) {
+    switch (be) {
+    case RC_BACKEND_WEBGPU: return "WebGPU";
+    case RC_BACKEND_VK:     return "Vulkan";
+    default:                return "OpenGL";
+    }
+}
 
 // Окно редактора под проект (путь) и бэкенд из хаба (1/3/2).
 // Темы из frontend/themes (цвета VS Code dark/light). Переключатель —
@@ -45,10 +56,11 @@ static void applyTheme(QApplication &app, const QString &name) {
 }
 
 // Шаблон проекта -> домен ядра (выбор рендера живёт в хабе, не в коде).
-// Нет шаблона/неизвестен — воксель. Возвращает бит RC_CAP_*.
+// Константы — RC_CAP_* из контракта движка. Неизвестный шаблон — воксель,
+// но НЕ молча: это решение «что рисуем», его должен видеть пользователь.
 static unsigned domainForTemplate(const QString &project) {
     FILE *f = fopen((project + "/project.txt").toUtf8().constData(), "rb");
-    if (!f) return 1u;
+    if (!f) return RC_CAP_VOXEL;
     char line[256];
     QString tpl;
     while (fgets(line, sizeof line, f)) {
@@ -60,15 +72,19 @@ static unsigned domainForTemplate(const QString &project) {
         }
     }
     fclose(f);
-    if (tpl == "SDF Primitives") return 2u;
-    if (tpl == "Vector Shapes") return 4u;
-    if (tpl == "Pixel Canvas") return 8u;
-    if (tpl == "Mesh Soup") return 16u;
-    return 1u; // Empty, Voxel Terrain и всё остальное
+    if (tpl.isEmpty() || tpl == "Empty" || tpl == "Voxel Terrain") return RC_CAP_VOXEL;
+    if (tpl == "SDF Primitives") return RC_CAP_SDF;
+    if (tpl == "Vector Shapes") return RC_CAP_VECTOR;
+    if (tpl == "Pixel Canvas") return RC_CAP_PIXEL;
+    if (tpl == "Mesh Soup") return RC_CAP_MESH;
+    fprintf(stderr, "[editor] неизвестный шаблон '%s' — беру домен Voxel\n",
+            tpl.toUtf8().constData());
+    return RC_CAP_VOXEL;
 }
 
 static QMainWindow *openEditor(const QString &project, int backend) {
-    auto *win = new QMainWindow();    const char *be = backend == 1 ? "WebGPU" : (backend == 3 ? "Vulkan" : "OpenGL");
+    auto *win = new QMainWindow();
+    const QString be = backendName(backend);
     win->setWindowTitle(QString("Engine Editor - %1 [%2]").arg(project).arg(be));
     win->resize(1500, 900);
 
@@ -154,8 +170,8 @@ static QMainWindow *openEditor(const QString &project, int backend) {
         a->setCheckable(true);
         apiGroup->addAction(a);
     }
-    if (backend == 1) apiW->setChecked(true);
-    else if (backend == 3) apiV->setChecked(true);
+    if (backend == RC_BACKEND_WEBGPU) apiW->setChecked(true);
+    else if (backend == RC_BACKEND_VK) apiV->setChecked(true);
     else apiG->setChecked(true);
     // Переключение API — ПОСЛЕ создания вьюпорта (vp захватываем живым,
     // иначе nullptr навсегда и кнопки молчат — так и было). Коннекты ниже.
@@ -182,8 +198,10 @@ static QMainWindow *openEditor(const QString &project, int backend) {
     });
     unsigned dom = domainForTemplate(project);
     if (!vp->initDomain(dom, backend)) {
-        const char *dn = dom == 2 ? "SDF"
-                         : (dom == 4 ? "Vector" : (dom == 8 ? "Pixel" : (dom == 16 ? "Mesh" : "Voxel")));
+        const char *dn = dom == RC_CAP_SDF ? "SDF"
+                     : (dom == RC_CAP_VECTOR ? "Vector"
+                     : (dom == RC_CAP_PIXEL ? "Pixel"
+                     : (dom == RC_CAP_MESH ? "Mesh" : "Voxel")));
         con->log(QString("viewport: NO CORE for %1 on backend %2 (see terminal)").arg(dn).arg(backend));
     } else {
         con->log(QString("viewport: engine ok (%1)").arg(be));
@@ -200,20 +218,20 @@ static QMainWindow *openEditor(const QString &project, int backend) {
             fflush(stdout);
             win->setWindowTitle(QString("Engine Editor - %1 [%2]")
                                     .arg(project)
-                                    .arg(be == 1 ? "WebGPU" : (be == 3 ? "Vulkan" : "OpenGL")));
+                                    .arg(backendName(be)));
         } else {
             con->log(QString("api %1 FAILED (see terminal)").arg(nm));
             printf("api %s FAILED\n", nm);
             fflush(stdout);
             int cur = vp->api();
-            if (cur == 1) apiW->setChecked(true);
-            else if (cur == 3) apiV->setChecked(true);
+            if (cur == RC_BACKEND_WEBGPU) apiW->setChecked(true);
+            else if (cur == RC_BACKEND_VK) apiV->setChecked(true);
             else apiG->setChecked(true);
         }
     };
-    QObject::connect(apiW, &QAction::triggered, [=]() { apiSwitch(1, "webgpu"); });
-    QObject::connect(apiG, &QAction::triggered, [=]() { apiSwitch(2, "opengl"); });
-    QObject::connect(apiV, &QAction::triggered, [=]() { apiSwitch(3, "vulkan"); });
+    QObject::connect(apiW, &QAction::triggered, [=]() { apiSwitch(RC_BACKEND_WEBGPU, "webgpu"); });
+    QObject::connect(apiG, &QAction::triggered, [=]() { apiSwitch(RC_BACKEND_GL, "opengl"); });
+    QObject::connect(apiV, &QAction::triggered, [=]() { apiSwitch(RC_BACKEND_VK, "vulkan"); });
     // Режим гизмо: тулбар -> вьюпорт (двигать/крутить/тянуть тасканием осей).
     QObject::connect(gT, &QAction::triggered, [vp, con]() {
         if (vp) vp->setGizmoMode(0);
@@ -318,14 +336,18 @@ static QMainWindow *openEditor(const QString &project, int backend) {
         vp->setPlaying(true);
         con->log("autoplay");
     }
+    // T18: VOX_DAYT — только стартовый override, читается здесь ОДИН раз.
+    // Viewport больше не трогает env в кадре (дефолт 242с = полдень).
+    if (getenv("VOX_DAYT") && getenv("VOX_DAYT")[0]) {
+        vp->setDayTime((float)atof(getenv("VOX_DAYT")));
+        con->log(QString("day time override: %1s").arg(getenv("VOX_DAYT")));
+    }
     // Тест выбора: ED_SELECT=имя -> выбрать сущность после загрузки.
     if (getenv("ED_SELECT") && getenv("ED_SELECT")[0]) {
         QString nm = QString::fromUtf8(getenv("ED_SELECT"));
         QTimer::singleShot(500, [nm, con]() {
-            extern void ui_select(unsigned);
-            extern struct ScWorld *ui_world(void);
-            extern int sc_list(const struct ScWorld *, unsigned *, int);
-            extern const char *sc_name(const struct ScWorld *, unsigned);
+            // T10/N4: без extern-в-теле — ui_* из panels.h, sc_* из scene.h
+            // (оба уже включены выше).
             struct ScWorld *w = ui_world();
             unsigned list[64];
             int n = sc_list(w, list, 64);

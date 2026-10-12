@@ -17,6 +17,7 @@
 #include "vox/vox_gen.h"
 #include "vox_feed.h"
 #include <QMouseEvent>
+#include <cstdio>   // fprintf (T7: лог отсутствия blit-шейдеров)
 
 Viewport::Viewport(QWidget *parent) : QWidget(parent) {
     setMinimumSize(480, 270);
@@ -65,7 +66,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
     // Транзакция: члены коммитим только при успехе. Иначе после FAILED
     // врали бы чип, кнопки и тайтл (бэкенд новый, ядро старое).
     if (!glfwInit()) return false;
-    if (be == 2) { // GL: контекст 4.5
+    if (be == RC_BACKEND_GL) { // GL: контекст 4.5
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -73,7 +74,7 @@ bool Viewport::initDomain(unsigned dom, int be) {
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     }
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    GLFWwindow *win = glfwCreateWindow(1280, 720, "ed-viewport", 0, 0);
+    GLFWwindow *win = glfwCreateWindow(Viewport::kW, Viewport::kH, "ed-viewport", 0, 0);
     if (!win) return false;
     // Ядро по таблице «домен x бэкенд» (домен из шаблона, бэкенд из хаба).
     // Нет ячейки (напр. SDF под Vulkan) — честный false, редактор скажет.
@@ -85,8 +86,8 @@ bool Viewport::initDomain(unsigned dom, int be) {
     }
     struct RenderCore *newVrc = nullptr;
     // Vec-ядро для гизмо-оверлея делит окно/контекст (воксель под GL).
-    if (dom == RC_CAP_VOXEL && be == 2) {
-        newVrc = rc_create_by(RC_CAP_VECTOR, 2u);
+    if (dom == RC_CAP_VOXEL && be == RC_BACKEND_GL) {
+        newVrc = rc_create_by(RC_CAP_VECTOR, (unsigned)RC_BACKEND_GL); // T3: без магической 2u
         if (newVrc && !newVrc->init(newVrc, win)) {
             rc_destroy(newVrc);
             newVrc = nullptr;
@@ -116,8 +117,8 @@ bool Viewport::initDomain(unsigned dom, int be) {
     }
     RcTarget *newTarget = (RcTarget *)calloc(1, sizeof(RcTarget));
     // Цель и показ — только под GL (frame_to есть только там).
-    if (be == 2) {
-        if (!newTarget || !comp_target_gl_new(newTarget, 1280, 720)) {
+    if (be == RC_BACKEND_GL) {
+        if (!newTarget || !comp_target_gl_new(newTarget, Viewport::kW, Viewport::kH)) {
             free(newTarget);
             free(newWorld);
             newRc->shutdown(newRc);
@@ -129,8 +130,15 @@ bool Viewport::initDomain(unsigned dom, int be) {
             glfwDestroyWindow(win);
             return false;
         }
-        presentProg = rhi_gl_prog("engine/shaders/blit/blit.vert",
-                                  "engine/shaders/blit/blit.frag");
+        // T7/N2: относительный путь работал только при запуске editor из
+        // корня репозитория. Резолвим через rhi_gl_find (CWD -> каталог .so),
+        // фолбэк — прежний путь (rhi_gl_prog сама повторит попытку).
+        const char *bv = rhi_gl_find("engine/shaders/blit/blit.vert");
+        const char *bf = rhi_gl_find("engine/shaders/blit/blit.frag");
+        presentProg = rhi_gl_prog(bv ? bv : "engine/shaders/blit/blit.vert",
+                                  bf ? bf : "engine/shaders/blit/blit.frag");
+        if (!presentProg)
+            fprintf(stderr, "[viewport] blit shaders not found via CWD/.so resolution\n");
         presentVao = rhi_gl_empty_vao();
     }
     // Успех: коммит. Старое окно/ядра уже снесены вызывателем.
@@ -142,9 +150,9 @@ bool Viewport::initDomain(unsigned dom, int be) {
     backend = be;
     domain = dom;
     sdfFed = vecFed = meshFed = 0;
-    img = QImage(1280, 720, QImage::Format_RGB888);
+    img = QImage(Viewport::kW, Viewport::kH, QImage::Format_RGB888);
     img.fill(Qt::black);
-    if (!cpuBuf) cpuBuf = (uint8_t *)calloc((size_t)1280 * 720, 4); // разово
+    if (!cpuBuf) cpuBuf = (uint8_t *)calloc((size_t)Viewport::kW * Viewport::kH, 4); // разово
     if (!cpuBuf) return false;
     return true;
 }
@@ -207,8 +215,8 @@ static int project_pt(const float *pv, float x, float y, float z, float *ox, flo
     float cw = pv[3] * x + pv[7] * y + pv[11] * z + pv[15];
     if (cw <= 0.0f) return 0;
     float nx = cx / cw, ny = cy / cw;
-    *ox = (nx * 0.5f + 0.5f) * 1280.0f;
-    *oy = (1.0f - (ny * 0.5f + 0.5f)) * 720.0f;
+    *ox = (nx * 0.5f + 0.5f) * (float)Viewport::kW;
+    *oy = (1.0f - (ny * 0.5f + 0.5f)) * (float)Viewport::kH;
     return 1;
 }
 
@@ -223,12 +231,23 @@ static float seg_dist(float px, float py, float ax, float ay, float bx, float by
     return sqrtf(qx * qx + qy * qy);
 }
 
+// VOX_DAYT (секунды суток): env читаем ОДИН раз, кэшируем (T5/T13).
+// Дефолт — полдень (242с, верх дуги sdf_sun), как в референсной сцене.
+// Sentinel «не читали» = NAN: честный VOX_DAYT=0 больше не путается с «пусто».
+float Viewport::dayTime() const {
+    if (std::isnan(dayTCached)) {
+        const char *e = getenv("VOX_DAYT");
+        dayTCached = (e && e[0]) ? (float)atof(e) : 242.0f;
+    }
+    return dayTCached;
+}
+
 void Viewport::renderOnce() {
     if (!rc) {
         placeheld = 1; // ядро снесли (FAILED-пересадка): честная заглушка
         return;
     }
-    int isGL = (backend == 2);
+    int isGL = (backend == RC_BACKEND_GL);
     // Догрузка мира по 12 чанков за тик — только вокселю.
     // DDA (webgpu) ест сырьё, растр (gl/vk) — через фидер движка.
     if (domain == RC_CAP_VOXEL) {
@@ -238,7 +257,7 @@ void Viewport::renderOnce() {
         int cx = fedCur % GW, cz = fedCur / GW;
         VoxChunk *c = &((VoxChunk *)world)[cz * GW + cx];
         int ok = 0;
-        if (backend == 1 && rc->upload_chunk) {
+        if (backend == RC_BACKEND_WEBGPU && rc->upload_chunk) {
             ok = rc->upload_chunk(rc, c->cx, c->cz, c->id, 0);
         } else {
             const VoxChunk *nb[6] = {
@@ -251,16 +270,39 @@ void Viewport::renderOnce() {
         fedCur++;
     }
     } // domain == VOXEL
-    // Не-воксель: разовая заливка демо-сцены шаблона (та же что в scene3d).
-    if (domain == RC_CAP_SDF && !sdfFed && rc->upload_sdf) {
+    // T6: UI-мир (ScWorld, гизмо/инспектор) влияет на картинку.
+    // Сущности "cube"/"sphere" из инспектора управляют примитивами демо-сцены
+    // (раньше сцена была хардкодом и scene.txt/гизмо не двигали ничего).
+    ScWorld *uiw = ui_world();
+    Entity eCube = 0, eSph = 0;
+    if (uiw) {
+        static Entity lstBuf[SC_MAX];
+        Entity *lst = lstBuf;
+        int n = sc_list(uiw, lst, SC_MAX);
+        for (int i = 0; i < n; i++) {
+            const char *nm = sc_name(uiw, lst[i]);
+            if (!eCube && nm && !strcmp(nm, "cube")) eCube = lst[i];
+            else if (!eSph && nm && !strcmp(nm, "sphere")) eSph = lst[i];
+        }
+    }
+    ScTransform trCube = { {0,0,0}, {0,0,0}, {1,1,1} };
+    ScTransform trSph = { {0,0,0}, {0,0,0}, {1,1,1} };
+    if (eCube) trCube = sc_get(uiw, eCube);
+    if (eSph) trSph = sc_get(uiw, eSph);
+
+    // SDF: полная сцена каждый кадр (upload_sdf — контракт «кадр примитивов»).
+    if (domain == RC_CAP_SDF && rc->upload_sdf) {
         RcSdfObj prims[4];
         memset(prims, 0, sizeof prims);
-        prims[0].kind = 0; // сфера
-        prims[0].p0.x = 8; prims[0].p0.y = 56; prims[0].p0.z = 8;
-        prims[0].r = 3.0f; prims[0].mat = 0;
-        prims[1].kind = 1; // короб
-        prims[1].p0.x = 20; prims[1].p0.y = 54; prims[1].p0.z = -6;
-        prims[1].p1.x = 2.5f; prims[1].p1.y = 2.5f; prims[1].p1.z = 2.5f;
+        prims[0].kind = 0; // сфера (её ведёт сущность "sphere")
+        prims[0].p0.x = 8 + trSph.pos.x; prims[0].p0.y = 56 + trSph.pos.y; prims[0].p0.z = 8 + trSph.pos.z;
+        float ss = fmaxf(trSph.scale.x, 0.05f);
+        prims[0].r = 3.0f * ss; prims[0].mat = 0;
+        prims[1].kind = 1; // короб (ведёт "cube")
+        prims[1].p0.x = 20 + trCube.pos.x; prims[1].p0.y = 54 + trCube.pos.y; prims[1].p0.z = -6 + trCube.pos.z;
+        prims[1].p1.x = 2.5f * fmaxf(trCube.scale.x, 0.05f);
+        prims[1].p1.y = 2.5f * fmaxf(trCube.scale.y, 0.05f);
+        prims[1].p1.z = 2.5f * fmaxf(trCube.scale.z, 0.05f);
         prims[1].mat = 1;
         prims[2].kind = 2; // тор
         prims[2].p0.x = -4; prims[2].p0.y = 55; prims[2].p0.z = 14;
@@ -270,7 +312,7 @@ void Viewport::renderOnce() {
         prims[3].p0.x = -12; prims[3].p0.y = 58; prims[3].p0.z = 2;
         prims[3].p1.x = -6; prims[3].p1.y = 62; prims[3].p1.z = 2;
         prims[3].r = 0.8f; prims[3].mat = 3;
-        if (rc->upload_sdf(rc, prims, 4)) sdfFed = 1;
+        rc->upload_sdf(rc, prims, 4);
     }
     if (domain == RC_CAP_VECTOR && !vecFed && rc->upload_vector) {
         RcVecShape sh[4];
@@ -293,41 +335,53 @@ void Viewport::renderOnce() {
         memcpy(sh[3].rgba, blue, sizeof blue);
         if (rc->upload_vector(rc, sh, 4)) vecFed = 1;
     }
-    if (domain == RC_CAP_MESH && !meshFed && rc->upload_mesh) {
+    if (domain == RC_CAP_MESH && rc->upload_mesh) {
         // Куб-суп 36 вершин x 9 float (pos3 norm3 col3), как в scene3d.
+        // T6: трансформ сущности "cube" из UI-мира применяется к вершинам
+        // (центр куба в мировых координатах = (-24,56,-16) + trCube.pos).
         static float cube[36 * 9];
-        static int cubeMade = 0;
-        if (!cubeMade) {
-            float C[6][3] = {{0.8f, 0.15f, 0.1f}, {1, 0.8f, 0.1f}, {0.15f, 0.7f, 0.15f},
-                             {0.3f, 0.3f, 0.32f}, {0.15f, 0.3f, 0.8f}, {0.15f, 0.7f, 0.7f}};
-            float NN[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-            float P[6][4][3] = {{{1, -1, 1}, {1, -1, -1}, {1, 1, -1}, {1, 1, 1}},
-                                {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
-                                {{-1, 1, 1}, {1, 1, 1}, {1, 1, -1}, {-1, 1, -1}},
-                                {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
-                                {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
-                                {{1, -1, -1}, {-1, -1, -1}, {-1, 1, -1}, {-1, 1, -1}}};
-            int idx[6] = {0, 1, 2, 0, 2, 3}, n = 0;
-            for (int f = 0; f < 6; f++)
-                for (int k = 0; k < 6; k++) {
-                    int q = idx[k];
-                    cube[n * 9 + 0] = -24.0f + P[f][q][0] * 3.0f;
-                    cube[n * 9 + 1] = 56.0f + P[f][q][1] * 3.0f;
-                    cube[n * 9 + 2] = -16.0f + P[f][q][2] * 3.0f;
-                    cube[n * 9 + 3] = NN[f][0];
-                    cube[n * 9 + 4] = NN[f][1];
-                    cube[n * 9 + 5] = NN[f][2];
-                    cube[n * 9 + 6] = C[f][0];
-                    cube[n * 9 + 7] = C[f][1];
-                    cube[n * 9 + 8] = C[f][2];
-                    n++;
-                }
-            cubeMade = 1;
-        }
+        float C[6][3] = {{0.8f, 0.15f, 0.1f}, {1, 0.8f, 0.1f}, {0.15f, 0.7f, 0.15f},
+                         {0.3f, 0.3f, 0.32f}, {0.15f, 0.3f, 0.8f}, {0.15f, 0.7f, 0.7f}};
+        float NN[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        float P[6][4][3] = {{{1, -1, 1}, {1, -1, -1}, {1, 1, -1}, {1, 1, 1}},
+                            {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
+                            {{-1, 1, 1}, {1, 1, 1}, {1, 1, -1}, {-1, 1, -1}},
+                            {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+                            {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
+                            {{1, -1, -1}, {-1, -1, -1}, {-1, 1, -1}, {-1, 1, -1}}};
+        int idx[6] = {0, 1, 2, 0, 2, 3};
+        float ry = cosf(trCube.rot.x), sy = sinf(trCube.rot.x);
+        float rp = cosf(trCube.rot.y), sp = sinf(trCube.rot.y);
+        float rr = cosf(trCube.rot.z), sr = sinf(trCube.rot.z);
+        // M = Ry(yaw)*Rx(pitch)*Rz(roll) — тот же порядок, что m4euler в mat4.h.
+        float M[9] = {
+            ry * rr + sy * sp * sr, -ry * sr + sy * sp * rr, sy * rp,
+            rp * sr,                 rr * rp,                 -sp,
+            -sy * rr + ry * sp * sr, sy * sr + ry * sp * rr,  ry * rp
+        };
+        int n = 0;
+        for (int f = 0; f < 6; f++)
+            for (int k = 0; k < 6; k++) {
+                int q = idx[k];
+                float lx = P[f][q][0] * 3.0f * fmaxf(trCube.scale.x, 0.05f);
+                float ly = P[f][q][1] * 3.0f * fmaxf(trCube.scale.y, 0.05f);
+                float lz = P[f][q][2] * 3.0f * fmaxf(trCube.scale.z, 0.05f);
+                cube[n * 9 + 0] = -24.0f + trCube.pos.x + M[0] * lx + M[1] * ly + M[2] * lz;
+                cube[n * 9 + 1] = 56.0f + trCube.pos.y + M[3] * lx + M[4] * ly + M[5] * lz;
+                cube[n * 9 + 2] = -16.0f + trCube.pos.z + M[6] * lx + M[7] * ly + M[8] * lz;
+                float nx0 = NN[f][0], ny0 = NN[f][1], nz0 = NN[f][2];
+                cube[n * 9 + 3] = M[0] * nx0 + M[1] * ny0 + M[2] * nz0;
+                cube[n * 9 + 4] = M[3] * nx0 + M[4] * ny0 + M[5] * nz0;
+                cube[n * 9 + 5] = M[6] * nx0 + M[7] * ny0 + M[8] * nz0;
+                cube[n * 9 + 6] = C[f][0];
+                cube[n * 9 + 7] = C[f][1];
+                cube[n * 9 + 8] = C[f][2];
+                n++;
+            }
         RcMesh m;
         m.verts = cube;
         m.nverts = 36;
-        if (rc->upload_mesh(rc, &m)) meshFed = 1;
+        rc->upload_mesh(rc, &m);
     }
     // Пиксель: живой тест-паттерн каждый кадр (полосы + бегущая строка).
     // cpuBuf тут свободен (frame_cpu у пикселя не используется).
@@ -335,10 +389,10 @@ void Viewport::renderOnce() {
         static const uint8_t bars[8][3] = {{255, 255, 255}, {255, 255, 0}, {0, 255, 255},
                                            {0, 255, 0}, {255, 0, 255}, {255, 0, 0},
                                            {0, 0, 255}, {0, 0, 0}};
-        int ly = (frame * 4) % 720;
-        for (int y = 0; y < 720; y++) {
-            uint8_t *row = cpuBuf + (size_t)y * 1280 * 4;
-            for (int x = 0; x < 1280; x++) {
+        int ly = (frame * 4) % Viewport::kH;
+        for (int y = 0; y < Viewport::kH; y++) {
+            uint8_t *row = cpuBuf + (size_t)y * Viewport::kW * 4;
+            for (int x = 0; x < Viewport::kW; x++) {
                 const uint8_t *c = bars[(x / 160) % 8];
                 row[x * 4 + 0] = c[0];
                 row[x * 4 + 1] = c[1];
@@ -351,7 +405,7 @@ void Viewport::renderOnce() {
                 }
             }
         }
-        rc->upload_pixels(rc, cpuBuf, 1280, 720);
+        rc->upload_pixels(rc, cpuBuf, Viewport::kW, Viewport::kH);
     }
     RcView v;
     memset(&v, 0, sizeof v);
@@ -388,8 +442,8 @@ void Viewport::renderOnce() {
         v.pitch = (float)asin(dy / dl);
     }
     v.fov = camFov;
-    v.resW = 1280;
-    v.resH = 720;
+    v.resW = Viewport::kW;
+    v.resH = Viewport::kH;
     v.sunDir.x = 0.4f; v.sunDir.y = 0.75f; v.sunDir.z = 0.3f;
     // Грейд DDA как в референсной сцене template/scene3d (иначе WebGPU в нулях:
     // шейдер множит всё на exposure). GL/VK эти поля не едят.
@@ -399,9 +453,7 @@ void Viewport::renderOnce() {
     v.time = (float)frame / 60.0f;
     // Время суток как в демо (VOX_DAYT, секунды): дефолт полдень (242с,
     // верх дуги sdf_sun), чтобы фаза WebGPU была днём как GL/VK, не сумерками.
-    v.dayT = getenv("VOX_DAYT") && getenv("VOX_DAYT")[0]
-                 ? (float)atof(getenv("VOX_DAYT"))
-                 : 242.0f;
+    v.dayT = dayTime();
     if (isGL && target && rc->frame_to) {
         rc->frame_to(rc, &v, target);
         // Гизмо-оверлей вторым проходом (vec, бленд): оси выбранной сущности.
@@ -415,7 +467,7 @@ void Viewport::renderOnce() {
                 Vec3 f2, r2, u2;
                 cam_basis(v.yaw, v.pitch, &f2, &r2, &u2);
                 Mat4 pr = m4persp(2.0f * atanf(0.5f / (v.fov > 0.2f ? v.fov : 1.6f)),
-                                  1280.0f / 720.0f, 0.1f, 600.0f);
+                                  (float)Viewport::kW / (float)Viewport::kH, 0.1f, 600.0f);
                 Mat4 vw = m4look(v.camPos.x, v.camPos.y, v.camPos.z,
                                  v.camPos.x + f2.x, v.camPos.y + f2.y, v.camPos.z + f2.z);
                 Mat4 pv = m4mul(&pr, &vw);
@@ -458,15 +510,15 @@ void Viewport::renderOnce() {
             }
             RcView vv;
             memset(&vv, 0, sizeof vv);
-            vv.resW = 1280;
-            vv.resH = 720;
+            vv.resW = Viewport::kW;
+            vv.resH = Viewport::kH;
             vrc->frame_to(vrc, &vv, target);
         }
         // Цель -> QImage (верх GL снизу: строки флипаем).
         glBindFramebuffer(GL_FRAMEBUFFER, target->fbo);
-        static uint8_t row[1280 * 3];
-        for (int y = 0; y < 720; y++) {
-            glReadPixels(0, y, 1280, 1, GL_RGB, GL_UNSIGNED_BYTE, row);
+        static uint8_t row[Viewport::kW * 3];
+        for (int y = 0; y < Viewport::kH; y++) {
+            glReadPixels(0, y, Viewport::kW, 1, GL_RGB, GL_UNSIGNED_BYTE, row);
             uint8_t *dst = img.scanLine(719 - y);
             memcpy(dst, row, sizeof row);
         }
@@ -474,11 +526,11 @@ void Viewport::renderOnce() {
     } else if (rc->frame_cpu && cpuBuf) {
         // VK/WebGPU: ядро рендерит и скачивает кадр в CPU (RGBA, верх первый).
         // Синхронный сталл на забор — честная цена встраивания, как glReadPixels.
-        if (rc->frame_cpu(rc, &v, cpuBuf, 1280, 720)) {
-            for (int y = 0; y < 720; y++) {
-                uint8_t *s = cpuBuf + (size_t)y * 1280 * 4;
+        if (rc->frame_cpu(rc, &v, cpuBuf, Viewport::kW, Viewport::kH)) {
+            for (int y = 0; y < Viewport::kH; y++) {
+                uint8_t *s = cpuBuf + (size_t)y * Viewport::kW * 4;
                 uint8_t *d = img.scanLine(y);
-                for (int x = 0; x < 1280; x++) {
+                for (int x = 0; x < Viewport::kW; x++) {
                     d[x * 3 + 0] = s[x * 4 + 0];
                     d[x * 3 + 1] = s[x * 4 + 1];
                     d[x * 3 + 2] = s[x * 4 + 2];
@@ -532,11 +584,11 @@ bool Viewport::hasPicture() const {
 static int to_image(Viewport *vp, float mx, float my, float *ix, float *iy) {
     int w = vp->width(), h = vp->height();
     if (w <= 0 || h <= 0) return 0;
-    float sc = w / 1280.0f < h / 720.0f ? w / 1280.0f : h / 720.0f;
-    float ox = (w - 1280.0f * sc) * 0.5f, oy = (h - 720.0f * sc) * 0.5f;
+    float sc = w / (float)Viewport::kW < h / (float)Viewport::kH ? w / (float)Viewport::kW : h / (float)Viewport::kH;
+    float ox = (w - (float)Viewport::kW * sc) * 0.5f, oy = (h - (float)Viewport::kH * sc) * 0.5f;
     *ix = (mx - ox) / sc;
     *iy = (my - oy) / sc;
-    return *ix >= 0 && *ix < 1280 && *iy >= 0 && *iy < 720;
+    return *ix >= 0 && *ix < Viewport::kW && *iy >= 0 && *iy < Viewport::kH;
 }
 
 void Viewport::mousePressEvent(QMouseEvent *e) {
@@ -597,7 +649,7 @@ void Viewport::mouseMoveEvent(QMouseEvent *e) {
     float dist = sqrtf((pcamX - dragPX) * (pcamX - dragPX) +
                        (pcamY - dragPY) * (pcamY - dragPY) +
                        (pcamZ - dragPZ) * (pcamZ - dragPZ));
-    float wpp = dist / (pfov > 0.2f ? pfov : 1.6f) / 720.0f;
+    float wpp = dist / (pfov > 0.2f ? pfov : 1.6f) / (float)Viewport::kH;
     float pixAlong = (ix - dragSX) * dx + (iy - dragSY) * dy;
     float along = pixAlong * wpp;
     ScTransform et = sc_get(ui_world(), sel);
@@ -648,7 +700,7 @@ void Viewport::paintEvent(QPaintEvent *) {
     p.drawText(8, 16, QString("fps %1").arg(fpsEma, 0, 'f', 0));
     // Чип как в референсах: FPS + бэкенд справа сверху.
     {
-        const char *be = backend == 1 ? "WebGPU" : (backend == 3 ? "Vulkan" : "OpenGL");
+        QString be = (backend == RC_BACKEND_WEBGPU) ? "WebGPU" : ((backend == RC_BACKEND_VK) ? "Vulkan" : "OpenGL");
         QString chip = QString("FPS: %1 / RHI: %2").arg(fpsEma, 0, 'f', 0).arg(be);
         QFontMetrics fm(p.font());
         int tw = fm.horizontalAdvance(chip) + 16;

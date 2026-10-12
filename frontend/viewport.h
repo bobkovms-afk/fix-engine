@@ -5,9 +5,11 @@
 // в FBO-цель через frame_to, пиксели забираем glReadPixels в QImage.
 // VK/WebGPU — через frame_cpu (ядро рендерит и скачивает в RGBA).
 // Никакого QOpenGLWidget: обмен через память, контексты не делим.
+#include <cmath>   // NAN для dayTCached (sentinel «env не читали»)
 #include <QWidget>
 #include <QImage>
 #include <QTimer>
+#include "../engine/render_api.h" // RC_BACKEND_* — единые константы с движком
 
 class Viewport : public QWidget {
 public:
@@ -41,9 +43,21 @@ protected:
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
 
+public:
+    // Единый источник размера кадра вьюпорта (T11/N1: раньше 1280x720 был
+    // зашит ~30 местами в .cpp). Меняем здесь — весь пайплайн следует.
+    static constexpr int kW = 1280, kH = 720;
+
 private:
     void tick();
     void renderOnce();
+public:
+    // T18 (расширение T5): явный CLI override времени суток из main.cpp.
+    // Вызывается ДО первого кадра; после него getenv("VOX_DAYT") больше
+    // не читается вовсе (env = только стартовый override, как и задумано).
+    void setDayTime(float sec) { dayTCached = sec; }
+private:
+    float dayTime() const; // кэш VOX_DAYT (T5/T13): читаем env один раз
 
     struct RenderCore *rc = nullptr;
     struct RenderCore *vrc = nullptr; // vec-ядро для гизмо-оверлея (та же цель)
@@ -52,7 +66,7 @@ private:
     QImage img;
     uint8_t *cpuBuf = nullptr; // RGBA 1280x720 для frame_cpu (VK/WebGPU), разово
     int placeheld = 0; // 1 если кадра нет: рисуем текст
-    int backend = 2; // выбранный в хабе (1 webgpu, 3 vk, 2 gl)
+    int backend = RC_BACKEND_GL; // выбранный в хабе (webgpu/gl/vk — RC_BACKEND_*)
     unsigned domain = 1; // домен из шаблона (1 воксель, 2 sdf, 4 вектор, 16 меш)
     int gizmoMode = 0; // 0 двигать, 1 крутить, 2 тянуть (тулбар)
     int sdfFed = 0, vecFed = 0, meshFed = 0; // разовые заливки
@@ -67,6 +81,11 @@ private:
     int fed[25] = {0};
     int fedLeft = 25, fedCur = 0;
     float camYaw = 0.6f, camPitch = -0.4f, camFov = 1.6f;
+    // Кэш VOX_DAYT (T5/T13): env читаем один раз при первом рендере,
+    // а не 3x getenv() каждый кадр. 0 = ещё не читали.
+    // NAN = «env ещё не читали»; любые значения env (в т.ч. VOX_DAYT=0) кэшируются
+    // корректно — раньше sentinel 0.0001f ломал честный VOX_DAYT=0 (круг 4, N-мелочь).
+    mutable float dayTCached = NAN;
     int viewMode = 0; // 0 орбита, 1 верх, 2 бок, 3 фронт (орто-кнопки тулбара)
     // Гизмо-таскание: -1 нет, 0/1/2 ось XYZ. Точка старта и якорь мыши.
     int dragAxis = -1;

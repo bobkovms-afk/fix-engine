@@ -31,27 +31,16 @@ typedef struct {
     SDFCore core;
 } SDFCoreWrap;
 
-// Шейдеры ищутся от корня репо; запасной — рядом с движком.
+// T16: единый резолв rhi_gl_find (CWD -> вверх -> каталог .so).
+// Старые списки из двух путей ломались при запуске не из корня репо.
 static const char *sdf_vs(void) {
-    static const char *paths[] = {
-        "engine/shaders/sdf_gl/ray.vert", "shaders/sdf_gl/ray.vert",
-    };
-    for (int i = 0; i < 2; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (f) { fclose(f); return paths[i]; }
-    }
-    return paths[0];
+    const char *hit = rhi_gl_find("engine/shaders/sdf_gl/ray.vert");
+    return hit ? hit : "engine/shaders/sdf_gl/ray.vert";
 }
 
 static const char *sdf_fs(void) {
-    static const char *paths[] = {
-        "engine/shaders/sdf_gl/ray.frag", "shaders/sdf_gl/ray.frag",
-    };
-    for (int i = 0; i < 2; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (f) { fclose(f); return paths[i]; }
-    }
-    return paths[0];
+    const char *hit = rhi_gl_find("engine/shaders/sdf_gl/ray.frag");
+    return hit ? hit : "engine/shaders/sdf_gl/ray.frag";
 }
 
 static float sdf_fps(RenderCore *rc) {
